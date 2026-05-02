@@ -195,20 +195,27 @@ work that's wasted on non-matching CVs. Under forkprove with preloaded
 modules, `B::begin_av()` alone contains ~4,500 CVs, ~98% from non-selected
 files.
 
-Wraps `get_cover_progress` to pre-filter each CV list using
-`$cv->START->file` → `use_file` before the list enters the per-CV loop.
-This eliminates thousands of CVs in a single pass rather than paying
-per-call function overhead on each one.
+Wraps `get_cover_progress` to pre-filter each CV list before it enters the
+per-CV loop. For each CV, the file is determined via `$cv->START->file` when
+`START` is a `B::COP` (the fast path — covers the vast majority of CVs).
+For non-`B::COP` CVs, the wrapper calls stock `Devel::Cover::sub_info` to
+walk `ROOT→lineseq→first` and find the start op the same way `get_cover`
+would. CVs where neither path finds a file are filtered out.
+
+Filtering out locationless CVs is necessary for correctness, not just
+performance. Stock `get_cover` sets `$File`/`$Line` via `get_location` only
+when `sub_info` returns a truthy `$start`. When it doesn't, `$File`/`$Line`
+remain stale from the previous CV. In an unfiltered list with thousands of
+ignored CVs, that stale `$File` almost always points at an ignored file,
+causing `use_file` to reject the CV. In a pre-filtered list, stale `$File`
+would point at the last *selected* file instead, causing the CV to be
+incorrectly accepted and its coverage misattributed.
 
 Per forkprove child (preloaded, debug output):
 - BEGIN block: 4,550 → 98 CVs (97.8% eliminated)
 - CHECK block: 2 → 0
 - END/INIT block: 14 → 3
 - CV: 110 → 110 (already filtered by walksymtable's `find_cv`)
-
-CVs where `START` isn't a `B::COP` (XS subs, builtins) pass through
-unfiltered — stock `get_cover` uses a different code path (`sub_info` →
-`ROOT→lineseq→nextstate`, not `START`) to find the file.
 
 ## Optimization 3: Pre-cache deparse walks (`cache`, opt-in)
 

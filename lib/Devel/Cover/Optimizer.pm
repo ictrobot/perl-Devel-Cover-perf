@@ -184,9 +184,15 @@ sub import {
     # work that's wasted on non-matching CVs. Pre-filtering the lists
     # via START->file before they enter the per-CV loop avoids this.
     #
-    # CVs where START isn't a B::COP pass through unfiltered — stock
-    # get_cover uses a different code path (sub_info →
-    # ROOT→lineseq→nextstate) to find the file.
+    # For CVs where START is a B::COP, START->file gives us a cheap
+    # file decision. For non-B::COP CVs, we call stock sub_info to
+    # find the start op via the same ROOT walk get_cover uses. If
+    # sub_info finds no location, we filter the CV out: stock
+    # get_cover() would leave $File stale from the previous call, and
+    # with thousands of ignored CVs in the unfiltered list, that stale
+    # $File almost always causes rejection. Passing such CVs through a
+    # filtered list would instead leave $File pointing at the last
+    # *selected* file, incorrectly accepting the CV.
 
     if (!$no_get_cover_progress) {
         my $orig_gcp = \&Devel::Cover::get_cover_progress;
@@ -196,11 +202,14 @@ sub import {
             my @filtered;
             for my $cv (@_) {
                 if (ref($cv) eq "B::CV") {
-                    my $start = $cv->START;
-                    if (ref($start) eq "B::COP") {
-                        my $file = $start->file;
-                        next if length($file) && !Devel::Cover::use_file($file);
+                    my $op = $cv->START;
+                    if (ref($op) ne "B::COP") {
+                        my (undef, $start) = Devel::Cover::sub_info($cv);
+                        next unless $start && $start->can("file");
+                        $op = $start;
                     }
+                    my $file = $op->file;
+                    next if length($file) && !Devel::Cover::use_file($file);
                 }
                 push @filtered, $cv;
             }
