@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Options:
+  -f, --fork              Use forkprove instead of prove
+  -c, --cover             Enable Devel::Cover
+  -o, --optimizer[=OPTS]  Enable Devel::Cover::Optimizer (comma-separated opts, e.g. cache,debug)
+  -h, --help              Show this help
+
+Examples:
+  $(basename "$0")                # prove
+  $(basename "$0") -f             # forkprove
+  $(basename "$0") -c             # prove + coverage
+  $(basename "$0") -fc            # forkprove + coverage
+  $(basename "$0") -fco           # forkprove + coverage + Optimizer (default opts)
+  $(basename "$0") -fc -o cache   # forkprove + coverage + Optimizer with cache
+  $(basename "$0") -fc -o cache,debug
+EOF
+    exit 0
+}
+
+fork=0
+cover=0
+optimizer=0
+optimizer_opts=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --fork)        fork=1; shift ;;
+        --cover)       cover=1; shift ;;
+        --optimizer)   optimizer=1; shift ;;
+        --optimizer=*) optimizer=1; optimizer_opts="${1#--optimizer=}"; shift ;;
+        --help)        usage ;;
+        -*)
+            flags="${1#-}"
+            shift
+            while [[ -n "$flags" ]]; do
+                flag="${flags:0:1}"
+                flags="${flags:1}"
+                case "$flag" in
+                    f) fork=1 ;;
+                    c) cover=1 ;;
+                    o)
+                        optimizer=1
+                        if [[ -z "$flags" && ${1:-} && ! ${1:-} =~ ^- ]]; then
+                            optimizer_opts="$1"; shift
+                        fi ;;
+                    h) usage ;;
+                    *) echo "Unknown flag: -$flag" >&2; usage ;;
+                esac
+            done ;;
+        *) echo "Unknown option: $1" >&2; usage ;;
+    esac
+done
+
+lib_dir="$(cd ../lib && pwd)"
+
+if (( fork )); then
+    runner=(forkprove -lr -I. -MMyApp::Web)
+    if (( optimizer && cover )); then
+        opt_mod="-MDevel::Cover::Optimizer"
+        [[ -n "$optimizer_opts" ]] && opt_mod+="=$optimizer_opts"
+        runner+=("$opt_mod")
+    fi
+    runner+=(t/)
+else
+    runner=(prove -lr t/)
+fi
+
+if (( cover )); then
+    cover -delete -silent
+    perl5opt="-I${lib_dir} -MDevel::Cover=+select,^lib,+ignore,^"
+    if (( optimizer && ! fork )); then
+        opt_mod="-MDevel::Cover::Optimizer"
+        [[ -n "$optimizer_opts" ]] && opt_mod+="=$optimizer_opts"
+        perl5opt+=" $opt_mod"
+    fi
+    echo "+ PERL5OPT='$perl5opt' ${runner[*]}" >&2
+    PERL5OPT="$perl5opt" "${runner[@]}"
+    cover -silent
+else
+    echo "+ ${runner[*]}" >&2
+    "${runner[@]}"
+fi

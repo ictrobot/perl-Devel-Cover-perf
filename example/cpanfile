@@ -1,0 +1,28 @@
+requires 'Moo', '>= 2.005';
+requires 'Type::Tiny', '>= 2.0';
+requires 'Mojolicious', '>= 9.0';
+requires 'namespace::autoclean';
+requires 'JSON::MaybeXS';
+requires 'Template';
+requires 'XML::LibXML';
+requires 'DateTime';
+requires 'DBIx::Class';
+requires 'DBIx::Class::Schema::Loader';
+requires 'SQL::Translator';
+requires 'Config::Any';
+requires 'Moose';
+requires 'MooseX::NonMoose';
+requires 'MooseX::MarkAsMethods';
+requires 'Data::UUID';
+requires 'Digest::SHA';
+requires 'POSIX';
+requires 'List::Util';
+requires 'Scalar::Util';
+requires 'Time::Piece';
+
+on 'test' => sub {
+    requires 'Test::More';
+    requires 'Test::Exception';
+    requires 'Test::Deep';
+    requires 'Test::Mojo';
+};
