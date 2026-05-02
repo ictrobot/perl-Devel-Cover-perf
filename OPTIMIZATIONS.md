@@ -45,8 +45,7 @@ default optimizer mode:
 ### Options
 
 - `no_walksymtable` — disable optimization 1 (walksymtable replacement)
-- `no_get_cover_progress` — disable optimization 2 (get_cover_progress pre-filter)
-- `cache` — enable optimization 3 (deparse cache, requires PadWalker)
+- `cache` — enable optimization 2 (deparse cache, requires PadWalker)
 - `debug` — log all filtering decisions to STDERR
 
 ## Benchmark Results (130 libs, 115 tests)
@@ -58,52 +57,28 @@ default optimizer mode:
 | `prove`      | 9.7s  |
 | `forkprove`  | 7.5s  |
 
-### Default mode (optimizations 1+2)
+### Default mode (optimization 1)
 
 | Configuration              | `prove`    | `forkprove` |
 |----------------------------|------------|-------------|
-| stock (no Optimizer)          | 26.6s      | 35.0s       |
-| **Devel::Cover::Optimizer**   | **21.5s**  | **23.2s**   |
+| stock (no Optimizer)          | 27.4s      | 36.1s       |
+| **Devel::Cover::Optimizer**   | **22.2s**  | **24.9s**   |
 
-**-19%** with `prove` and **-34%** with `forkprove` vs stock. With Optimizer,
-`forkprove + cover` (23.2s) is now faster than `prove + cover` stock (26.6s).
+**-19%** with `prove` and **-31%** with `forkprove` vs stock. With Optimizer,
+`forkprove + cover` (24.9s) is faster than `prove + cover` stock (27.4s).
 
-### With `cache` (optimizations 1+2+3, requires PadWalker)
+### With `cache` (optimizations 1+2, requires PadWalker)
 
 | Configuration              | `prove`    | `forkprove` |
 |----------------------------|------------|-------------|
-| stock (no Optimizer)          | 26.6s      | 35.4s       |
-| Optimizer (no cache)          | 21.5s      | 23.2s       |
-| **Optimizer + cache**         | **21.9s**  | **14.3s**   |
+| stock (no Optimizer)          | 27.4s      | 36.1s       |
+| Optimizer (no cache)          | 22.2s      | 24.9s       |
+| **Optimizer + cache**         | **22.2s**  | **18.0s**   |
 
 The cache has minimal impact under `prove` (each child starts fresh, nothing
-to pre-cache), but under `forkprove` it eliminates ~9s of redundant
-`B::Deparse` work inherited from the preloaded parent — a **-60%** reduction
-vs stock and **-38%** vs Optimizer without cache.
-
-### Individual optimization impact
-
-| Configuration                    | `prove`  | `forkprove` |
-|----------------------------------|----------|-------------|
-| stock (no Optimizer)             | 26.6s    | 35.0s       |
-| opt 1 only (walksymtable)        | 22.7s    | 25.5s       |
-| opt 2 only (get_cover_progress)  | 25.4s    | 31.2s       |
-| opt 1+2                          | 21.5s    | 23.2s       |
-
-Optimization 1 is by far the highest impact. Optimization 2 contributes
-meaningful savings on top, particularly under forkprove (~3s).
-
-### Memory overhead (forkprove, peak RSS, 3 runs)
-
-| Configuration              | Run 1   | Run 2   | Run 3   | Avg     | vs stock |
-|----------------------------|---------|---------|---------|---------|----------|
-| stock                      | 154.5MB | 154.8MB | 154.6MB | 154.6MB | —        |
-| opt 1+2                    | 153.1MB | 153.1MB | 152.9MB | 153.0MB | -1.0%    |
-
-No meaningful memory overhead. The walksymtable replacement actually uses
-slightly *less* memory than stock — likely because pruning package subtrees
-avoids allocating B:: objects for thousands of CVs that stock would inspect
-and discard.
+to pre-cache), but under `forkprove` it eliminates ~7s of redundant
+`B::Deparse` work inherited from the preloaded parent — a **-50%** reduction
+vs stock and **-28%** vs Optimizer without cache.
 
 ## Optimization 1: Replace walksymtable with filtered version
 
@@ -183,41 +158,7 @@ For conventional module layouts and broad exclusive selects like
 `+select,^lib,+ignore,^`, this works correctly. Use `no_walksymtable` if you
 encounter missing coverage with unusual module layouts.
 
-## Optimization 2: Pre-filter CV lists in `get_cover_progress`
-
-**Target:** `_report` → `get_cover_progress` → `get_cover` (26% of
-END-block overhead)
-
-`_report()` calls `get_cover_progress()` for BEGIN, CHECK, END/INIT, and CV
-lists. Each CV goes through `get_cover()`, which allocates `B::Deparse->new`,
-calls `sub_info` (walks the B:: op tree), and runs `use_file` — expensive
-work that's wasted on non-matching CVs. Under forkprove with preloaded
-modules, `B::begin_av()` alone contains ~4,500 CVs, ~98% from non-selected
-files.
-
-Wraps `get_cover_progress` to pre-filter each CV list before it enters the
-per-CV loop. For each CV, the file is determined via `$cv->START->file` when
-`START` is a `B::COP` (the fast path — covers the vast majority of CVs).
-For non-`B::COP` CVs, the wrapper calls stock `Devel::Cover::sub_info` to
-walk `ROOT→lineseq→first` and find the start op the same way `get_cover`
-would. CVs where neither path finds a file are filtered out.
-
-Filtering out locationless CVs is necessary for correctness, not just
-performance. Stock `get_cover` sets `$File`/`$Line` via `get_location` only
-when `sub_info` returns a truthy `$start`. When it doesn't, `$File`/`$Line`
-remain stale from the previous CV. In an unfiltered list with thousands of
-ignored CVs, that stale `$File` almost always points at an ignored file,
-causing `use_file` to reject the CV. In a pre-filtered list, stale `$File`
-would point at the last *selected* file instead, causing the CV to be
-incorrectly accepted and its coverage misattributed.
-
-Per forkprove child (preloaded, debug output):
-- BEGIN block: 4,550 → 98 CVs (97.8% eliminated)
-- CHECK block: 2 → 0
-- END/INIT block: 14 → 3
-- CV: 110 → 110 (already filtered by walksymtable's `find_cv`)
-
-## Optimization 3: Pre-cache deparse walks (`cache`, opt-in)
+## Optimization 2: Pre-cache deparse walks (`cache`, opt-in)
 
 **Target:** `get_cover` → `B::Deparse::deparse_sub` per CV (redundant
 B:: op tree walks in forked children)
@@ -353,7 +294,7 @@ list and sort order match what `_report` will see.
 Under `prove` (no preload), this has minimal effect — children start fresh
 and the cache is empty. Under `forkprove` with preloaded modules, the
 savings are substantial: the deparse walk is the dominant remaining cost
-after optimizations 1 and 2, and this eliminates it for all cached CVs.
+after optimization 1, and this eliminates it for all cached CVs.
 
 ### Why opt-in
 
@@ -365,9 +306,32 @@ up a temporary `Structure` object to run the cache-building deparse pass,
 and replays recorded call sequences rather than re-discovering them from
 the op tree. These assumptions are validated (op addresses are checked,
 `%Coverage` is guarded, state is saved/restored), but they couple more
-tightly to Devel::Cover's internals than optimizations 1 and 2.
+tightly to Devel::Cover's internals than optimization 1.
 
 ## Discarded approaches
+
+### Pre-filter CV lists in `get_cover_progress`
+
+Wrapped `get_cover_progress` to skip ignored CVs before `get_cover` runs.
+The fast path used `$cv->START->file` for B::COP CVs and
+`Devel::Cover::sub_info` for the rest.
+
+The only expensive thing `get_cover` does for ignored CVs is
+`B::Deparse->new` (~1μs) and `sub_info` (cheap op tree walk) — it already
+returns before `deparse_sub` thanks to its own `use_file` check. So the
+pre-filter saves microseconds per CV. At the same time, stock `get_cover`
+relies on `$File`/`$Line` state accumulated across iterations: it calls
+`get_location` on each CV's start op, and CVs without a discoverable
+location inherit stale `$File` from the previous iteration. Removing ignored
+CVs from the iteration changes what stale `$File` a locationless CV sees,
+causing it to be accepted and misattributed against a selected file.
+
+A correct implementation that preserves the `$File`/`$Line` state sequence
+was built (calling `get_location` for skipped CVs, falling back to
+`sub_info` for non-B::COP cases, guarding against GV edge cases on newer
+Perls). It was correct across Perl 5.26/5.32/5.40 and DC 1.33-1.52, but
+benchmarked identically to running without it — the overhead of maintaining
+state parity cancelled out the savings from skipping `B::Deparse->new`.
 
 ### Per-CV file check in walksymtable
 
@@ -391,13 +355,10 @@ sorting) and once in `get_cover`.
 extract the sub name and start op. Caching by CV address (`$$cv`) avoids
 redundant B:: method calls.
 
-Benchmarked at 22.1s `prove` / 21.7s `forkprove` with the other two
-optimizations active (vs 21.1s / 21.9s with all three) — no measurable
-effect. The 33.7% cache hit rate is lower than the theoretical 50% because
-BEGIN-block CVs go through `get_cover` but not `check_files` sorting.
-Additionally, when optimization 2 is active it pre-filters most CVs from
-the list, removing the second `sub_info` call that would have been a cache
-hit.
+Benchmarked at 22.1s `prove` / 21.7s `forkprove` with optimization 1
+active — no measurable effect. The 33.7% cache hit rate is lower than the
+theoretical 50% because BEGIN-block CVs go through `get_cover` but not
+`check_files` sorting.
 
 ### Wrap `find_cv` with file-level cache
 

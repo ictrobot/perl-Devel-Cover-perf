@@ -27,7 +27,6 @@ use warnings;
 #
 # Options:
 #   no_walksymtable        — disable optimization 1 (walksymtable replacement)
-#   no_get_cover_progress  — disable optimization 2 (get_cover_progress pre-filter)
 #   cache                  — pre-cache deparse walks for preloaded CVs (requires PadWalker)
 #   debug                  — log all filtering decisions to STDERR
 
@@ -49,7 +48,6 @@ sub import {
     }
 
     my $no_walksymtable       = delete $opts{no_walksymtable};
-    my $no_get_cover_progress = delete $opts{no_get_cover_progress};
     my $cache_mode            = delete $opts{cache};
 
     no warnings 'redefine';
@@ -176,51 +174,7 @@ sub import {
         *Devel::Cover::walksymtable = $walk;
     }
 
-    # --- Optimization 2: pre-filter CV lists in get_cover_progress ---
-    #
-    # _report() calls get_cover_progress() for BEGIN, CHECK, END/INIT,
-    # and CV lists. Each CV goes through get_cover(), which allocates
-    # B::Deparse, walks the op tree, and checks use_file — expensive
-    # work that's wasted on non-matching CVs. Pre-filtering the lists
-    # via START->file before they enter the per-CV loop avoids this.
-    #
-    # For CVs where START is a B::COP, START->file gives us a cheap
-    # file decision. For non-B::COP CVs, we call stock sub_info to
-    # find the start op via the same ROOT walk get_cover uses. If
-    # sub_info finds no location, we filter the CV out: stock
-    # get_cover() would leave $File stale from the previous call, and
-    # with thousands of ignored CVs in the unfiltered list, that stale
-    # $File almost always causes rejection. Passing such CVs through a
-    # filtered list would instead leave $File pointing at the last
-    # *selected* file, incorrectly accepting the CV.
-
-    if (!$no_get_cover_progress) {
-        my $orig_gcp = \&Devel::Cover::get_cover_progress;
-
-        *Devel::Cover::get_cover_progress = sub {
-            my $type = shift;
-            my @filtered;
-            for my $cv (@_) {
-                if (ref($cv) eq "B::CV") {
-                    my $op = $cv->START;
-                    if (ref($op) ne "B::COP") {
-                        my (undef, $start) = Devel::Cover::sub_info($cv);
-                        next unless $start && $start->can("file");
-                        $op = $start;
-                    }
-                    my $file = $op->file;
-                    next if length($file) && !Devel::Cover::use_file($file);
-                }
-                push @filtered, $cv;
-            }
-            if ($debug && @filtered != @_) {
-                warn "  [get_cover] pre-filtered $type: " . scalar(@_) . " → " . scalar(@filtered) . " CVs\n";
-            }
-            $orig_gcp->($type, @filtered);
-        };
-    }
-
-    # --- Optimization 3: cache deparse walks for preloaded CVs ---
+    # --- Optimization 2: cache deparse walks for preloaded CVs ---
     #
     # Only useful under forkprove. When Devel::Cover processes a CV
     # (subroutine), it walks the entire compiled op tree via
