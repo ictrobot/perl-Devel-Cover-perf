@@ -18,6 +18,23 @@ savings.
 | `prove + cover`    | 26.9s |                                 |
 | `forkprove + cover`| 36.0s | **slower** than prove + cover   |
 
+## Note on forkprove Coverage Counts
+
+When Devel::Cover is enabled via `PERL5OPT` and forkprove preloads an
+application with `-M`, the preload runs in the forkprove parent while coverage
+collection is already active. The resulting counters are inherited by every
+forked test child, so detailed reports can show much higher raw execution
+counts for preload-time statements and `BEGIN` blocks than a plain `prove`
+coverage run.
+
+This usually changes counts rather than coverage percentages: the same lines,
+branches, conditions, and subroutines are present, but preload-time code is
+counted once per child instead of once per test process that loaded it. It can
+change covered/uncovered status if the preload executes selected code that the
+plain `prove` run would not otherwise load or execute. For correctness checks,
+compare detailed `forkprove` optimizer output against stock `forkprove`, not
+against stock `prove`.
+
 ## Root Cause
 
 Devel::Cover's `_report()` runs in every child process's END block. It does

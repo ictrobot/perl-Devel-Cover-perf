@@ -2,11 +2,12 @@
 # Sourceable library — run one test mode inside a Docker container.
 
 ALL_MODES=(baseline fork opt fork-opt fork-opt-cache)
-DC_COVERAGE="-coverage,statement,branch,condition,subroutine"
+DC_REPORT_COVERAGE="statement,branch,condition,subroutine"
+DC_COVERAGE="-coverage,${DC_REPORT_COVERAGE}"
 
 # run_mode IMAGE MODE EXAMPLE_DIR OUTPUT_DIR REPO_ROOT [JOBS]
 # Runs the given mode inside a Docker container and writes results to OUTPUT_DIR.
-# Output files: exit-code.txt, time.txt, summary.txt, test-output.txt
+# Output files: exit-code.txt, time.txt, summary.txt, detailed.txt, test-output.txt
 run_mode() {
     local image="$1" mode="$2" example_dir="$3" output_dir="$4" repo_root="$5"
     local jobs="${6:-1}"
@@ -75,7 +76,10 @@ set +e
 echo \$? > /opt/output/exit-code.txt
 set -e
 
-cover -silent -coverage statement,branch,condition,subroutine 2>/dev/null \
+cover -silent -coverage ${DC_REPORT_COVERAGE} 2>/dev/null \
     | grep -E '^(---|File |lib/|Total)' > /opt/output/summary.txt || true
+cover -silent -nosummary -report text -coverage ${DC_REPORT_COVERAGE} \
+        2>/opt/output/detailed-stderr.txt \
+    | sed '/^Run:          /,/^$/d' > /opt/output/detailed.txt || true
 "
 }

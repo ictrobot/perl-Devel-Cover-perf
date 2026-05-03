@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 source "$SCRIPT_DIR/lib/runner.sh"
+source "$SCRIPT_DIR/lib/compare.sh"
 
 # Defaults
 os="alma8"
@@ -154,12 +155,19 @@ print_failure_detail() {
     local mode_dir="$1" status="$2"
     local test_output="$mode_dir/test-output.txt"
     local summary="$mode_dir/summary.txt"
-    local baseline="$3"
+    local detailed="$mode_dir/detailed.txt"
+    local baseline_summary="$3"
+    local baseline_detailed="${4:-}"
 
     log "    output: $mode_dir"
-    if [[ "$status" == "FAIL(coverage)" && -f "$baseline" && -f "$summary" ]]; then
-        log "    coverage diff:"
-        diff -u "$baseline" "$summary" 2>&1 | sed 's/^/      /' >&2 || true
+    if [[ "$status" == "FAIL(summary)" && -f "$baseline_summary" && -f "$summary" ]]; then
+        log "    summary diff:"
+        diff -u "$baseline_summary" "$summary" 2>&1 | sed 's/^/      /' >&2 || true
+    elif [[ "$status" == "FAIL(detail)" && -f "$baseline_detailed" && -f "$detailed" ]]; then
+        log "    detailed coverage diff (first 200 lines):"
+        diff -u "$baseline_detailed" "$detailed" 2>&1 \
+            | sed 's/^/      /' \
+            | head -200 >&2 || true
     elif [[ -f "$test_output" ]]; then
         log "    test output tail:"
         tail -40 "$test_output" | sed 's/^/      /' >&2
@@ -297,12 +305,11 @@ while IFS= read -r cur_os; do
             local_exit=$(read_mode_exit "$mode_dir")
             log "  $m finished: elapsed=${local_elapsed}s cpu=${local_cpu}s [exit $local_exit]"
             if [[ "$local_exit" != "0" ]]; then
-                print_failure_detail "$mode_dir" "FAIL(exit $local_exit)" "$run_dir/baseline/summary.txt"
+                print_failure_detail "$mode_dir" "FAIL(exit $local_exit)" "$run_dir/baseline/summary.txt" "$run_dir/baseline/detailed.txt"
             fi
             remaining=$((remaining - 1))
         done
 
-        # Compare each mode against baseline and build timing table
         baseline_summary="$run_dir/baseline/summary.txt"
         ver_failed=0
         timing_line="${cur_os} DC $ver:"
@@ -311,25 +318,21 @@ while IFS= read -r cur_os; do
             local_elapsed=$(read_mode_elapsed "$mode_dir")
             local_cpu=$(read_mode_cpu "$mode_dir")
             local_exit=$(read_mode_exit "$mode_dir")
+            detail_ref=$(detail_reference "$run_dir" "$m")
 
             if [[ "$local_exit" != "0" ]]; then
                 local_status="FAIL(exit $local_exit)"
                 ver_failed=1
             elif [[ "$mode" != "all" || "$m" == "baseline" ]]; then
                 local_status="PASS"
-            elif [[ ! -f "$baseline_summary" ]]; then
-                local_status="FAIL(no baseline)"
-                ver_failed=1
-            elif ! diff -q "$baseline_summary" "$mode_dir/summary.txt" &>/dev/null; then
-                local_status="FAIL(coverage)"
-                ver_failed=1
             else
-                local_status="PASS"
+                local_status=$(compare_mode_coverage "$run_dir" "$m")
+                [[ "$local_status" == "PASS" ]] || ver_failed=1
             fi
 
-            if [[ "$local_status" == "FAIL(coverage)" || "$local_status" == "FAIL(no baseline)" ]]; then
+            if is_coverage_failure "$local_status"; then
                 log "  $m comparison: elapsed=${local_elapsed}s cpu=${local_cpu}s [$local_status]"
-                print_failure_detail "$mode_dir" "$local_status" "$baseline_summary"
+                print_failure_detail "$mode_dir" "$local_status" "$baseline_summary" "$detail_ref"
             fi
             timing_line+="  $m=${local_elapsed}s[$local_status]"
         done <<< "$mode_list"
