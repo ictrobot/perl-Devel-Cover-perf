@@ -34,6 +34,8 @@ RUN dnf -y install 'perl(Test::Mojo)' || cpanm --notest --skip-satisfied Test::M
 
 # Tools needed by the optimizer
 RUN dnf -y install 'perl(PadWalker)' || cpanm --notest --skip-satisfied PadWalker
+RUN dnf -y install 'perl(Pod::Coverage)' || cpanm --notest --skip-satisfied Pod::Coverage
+RUN dnf -y install 'perl(Pod::Coverage::CountParents)' || cpanm --notest --skip-satisfied Pod::Coverage::CountParents
 RUN cpanm --notest --skip-satisfied App::ForkProve
 
 RUN dnf clean all

@@ -74,7 +74,7 @@ fi
 
 if (( cover )); then
     cover -delete -silent
-    perl5opt="-I${lib_dir} -MDevel::Cover=+select,^lib,+ignore,^"
+    perl5opt="-I${lib_dir} -Ilib -I. -MDevel::Cover=+select,^lib,+ignore,^"
     if (( optimizer && ! fork )); then
         opt_mod="-MDevel::Cover::Optimizer"
         [[ -n "$optimizer_opts" ]] && opt_mod+="=$optimizer_opts"

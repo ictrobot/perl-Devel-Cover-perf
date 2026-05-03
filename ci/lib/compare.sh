@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Sourceable library — compare coverage output across runner modes.
 
-# Summary output is compared to baseline for every mode. Detailed output is
-# compared within the matching runner family because forkprove preload changes
-# raw execution counts.
+# Summary output is compared to baseline for every mode. It contains only
+# percentage columns, so it can include POD coverage when requested but still
+# excludes raw counts. Detailed output includes the requested criteria and raw
+# counts, so it is compared within the matching runner family.
 
 summary_reference() {
     local run_dir="$1"
@@ -42,13 +43,13 @@ compare_mode_coverage() {
     elif [[ "$mode" == "fork" ]]; then
         echo "PASS"
     else
-        local baseline_detailed
-        baseline_detailed=$(detail_reference "$run_dir" "$mode")
-        if [[ ! -f "$baseline_detailed" ]]; then
+        local ref_detailed
+        ref_detailed=$(detail_reference "$run_dir" "$mode")
+        if [[ ! -f "$ref_detailed" ]]; then
             echo "FAIL(no detail baseline)"
         elif [[ ! -f "$mode_dir/detailed.txt" ]]; then
             echo "FAIL(no detail)"
-        elif ! diff -q "$baseline_detailed" "$mode_dir/detailed.txt" &>/dev/null; then
+        elif ! diff -q "$ref_detailed" "$mode_dir/detailed.txt" &>/dev/null; then
             echo "FAIL(detail)"
         else
             echo "PASS"

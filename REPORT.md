@@ -22,18 +22,77 @@ savings.
 
 When Devel::Cover is enabled via `PERL5OPT` and forkprove preloads an
 application with `-M`, the preload runs in the forkprove parent while coverage
-collection is already active. The resulting counters are inherited by every
-forked test child, so detailed reports can show much higher raw execution
-counts for preload-time statements and `BEGIN` blocks than a plain `prove`
-coverage run.
+collection is already active. That changes what the raw counters mean.
 
-This usually changes counts rather than coverage percentages: the same lines,
-branches, conditions, and subroutines are present, but preload-time code is
-counted once per child instead of once per test process that loaded it. It can
-change covered/uncovered status if the preload executes selected code that the
-plain `prove` run would not otherwise load or execute. For correctness checks,
-compare detailed `forkprove` optimizer output against stock `forkprove`, not
-against stock `prove`.
+In a plain `prove` coverage run, each test file starts a fresh Perl process.
+Any module compile-time work, including `use` statements and `BEGIN` blocks,
+runs in that test process, and Devel::Cover writes one run at process END. If a
+module is loaded by 10 test files, its compile-time statements and `BEGIN`
+blocks are counted about 10 times across the merged coverage database.
+
+With forkprove, there is first a long-lived parent process. Devel::Cover is
+already collecting in that parent, then forkprove loads the `-M` preload
+modules. All compile-time work for those modules runs once in the parent before
+any test child exists: `use` lines, imported modules, generated accessors,
+`BEGIN` blocks, and any other selected code executed during preload all leave
+non-zero Devel::Cover counters in the parent's memory.
+
+The parent then forks one child per test job/file. Each child receives a
+copy-on-write snapshot of those already non-zero counters. At child END,
+Devel::Cover's `_report()` reads the inherited counters and writes a normal run
+for that child. It has no way to distinguish "this count happened in the
+preload parent" from "this count happened in this child". The same preload
+counts are therefore written once by every child and then summed during report
+generation.
+
+This is why detailed forkprove reports often show much higher counts for
+preload-time code. A `BEGIN` block or `use Some::Module` line that actually ran
+once in the forkprove parent can appear with a count close to the number of
+forked children. In a plain `prove` run, the same line is counted only in the
+test processes that actually loaded that module. Runtime code executed after
+the fork does not have this inherited-count shape; it is counted in the child
+that executed it.
+
+In the text report this manifests in two obvious places. The per-line table can
+show inflated `stmt`/`sub` counts on compile-time lines such as `use strict`,
+`use warnings`, `use Some::Dependency`, and generated accessor setup. The
+covered-subroutines table can also show rows named `BEGIN` with counts near the
+number of forked children, even though the corresponding `BEGIN` block executed
+once in the parent. If a child later executes the same selected code after the
+fork, its child-local count is added on top of the inherited preload count.
+
+Usually this changes raw counts rather than coverage percentages: a line,
+branch arm, condition, or subroutine that was already non-zero remains covered.
+It can still change percentages when the preload executes selected code that a
+plain `prove` run would not load or execute, or when it executes only one side
+of a branch/condition before the child tests run.
+
+## Note on forkprove POD Coverage
+
+POD coverage has a separate forkprove sensitivity because Devel::Cover
+delegates it to `Pod::Coverage`, which inspects package documentation and the
+symbol table. This is secondary to the counter issue above, but it is another
+stock forkprove difference rather than an optimizer difference.
+
+The problem appears to be an `@INC` lifetime issue. `Pod::Coverage` can inspect
+symbols from an already-loaded package, but when it looks for the POD source it
+uses `Pod::Find` against the current `@INC`. It does not first resolve the file
+from the package's `%INC` entry.
+
+forkprove applies its `-l` / `-I` additions with a localized `@INC` while it is
+loading and running the test file in the child. Devel::Cover writes coverage in
+an END block, after that local scope has unwound. By then, modules loaded from
+the test library are still present in the symbol table and `%INC`, but their
+source directory may no longer be in the current `@INC`. `Pod::Coverage` then
+sees the package symbols but fails to find the POD file, so documented methods
+can be reported as POD-uncovered under stock forkprove even though the same
+methods are covered under stock prove.
+
+This is avoidable if the test library path is kept in the process-global
+`@INC`, for example through `PERL5OPT=-Ilib`, because `Pod::Coverage` can still
+find the file when Devel::Cover's END block runs. More robust fixes would be
+for Devel::Cover to pass the already-known source file as `pod_from`, or for
+`Pod::Coverage` to prefer `%INC` for loaded packages before searching `@INC`.
 
 ## Root Cause
 

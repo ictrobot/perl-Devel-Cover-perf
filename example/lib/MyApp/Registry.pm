@@ -19,3 +19,29 @@ sub services    { keys %{$_[0]->_store} }
 sub count       { scalar keys %{$_[0]->_store} }
 
 1;
+
+__END__
+
+=head1 NAME
+
+MyApp::Registry - service registry for the example application
+
+=head2 register
+
+Store an object under a service name.
+
+=head2 resolve
+
+Return the object registered for a service name.
+
+=head2 has_service
+
+Check whether a service name has been registered.
+
+=head1 TEST FIXTURE NOTE
+
+This POD deliberately documents only part of the public API. Some methods are
+left undocumented so the harness exercises both covered and uncovered POD
+coverage entries.
+
+=cut

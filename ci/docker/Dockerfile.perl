@@ -19,7 +19,7 @@ WORKDIR /tmp/example
 RUN cpanm --notest --installdeps .
 
 # Tools needed by the optimizer and test harness.
-RUN cpanm --notest --skip-satisfied App::ForkProve PadWalker
+RUN cpanm --notest --skip-satisfied App::ForkProve PadWalker Pod::Coverage Pod::Coverage::CountParents
 
 # Devel::Cover is the final layer so exact-version builds can reuse all
 # dependency layers.

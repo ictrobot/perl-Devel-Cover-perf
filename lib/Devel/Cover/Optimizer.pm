@@ -305,18 +305,25 @@ sub _install_deparse_cache {
 # During replay, children merge the delta to preserve duplicate-
 # suppression semantics without re-deparsing.
 #
-# The challenge is that get_cover() and add_*_cover() depend on
-# Devel::Cover's internal state ($Structure for the coverage DB
-# schema, $Coverage for runtime counts, %Run for config, $Sub_count
-# for dedup). These are lexical variables captured in closures, not
-# package globals, so we use PadWalker to get references to them.
+# The challenge is that get_cover() and add_*_cover() depend on Devel::Cover's
+# internal state: $Structure for the coverage DB schema, $Coverage for runtime
+# counts, %Run for report config and count/vec storage, $Sub_count for subroutine
+# deduplication, and POD coverage's $Pod/%Pod cache. These are lexical variables
+# captured in closures, not package globals, so we use PadWalker to get
+# references to them.
 #
 # We can't run get_cover() against the real state — it would record
 # coverage data before any tests run. Instead we swap in a temporary
 # $Structure (backed by a throwaway DB directory), empty $Coverage,
-# and minimal %Run, run the deparse walks, then restore everything.
-# The add_*_cover calls during cache building write into the
-# throwaway Structure, which we discard.
+# and a %Run matching the active criteria, run the deparse walks, then
+# restore everything. The add_*_cover calls during cache building write
+# into the throwaway Structure, which we discard.
+#
+# POD coverage is not part of the replay cache. There is no intercepted
+# add_pod_cover() equivalent to record and replay later; get_cover() writes POD
+# counts/vecs directly into %Run and may populate $Pod/%Pod as a side effect.
+# The temporary %Run and saved/restored POD state only make that speculative
+# prepass harmless. The real report pass still calculates POD coverage normally.
 sub _build_deparse_cache {
     my ($cache, $Cvs_ref, $Subs_only_ref, $debug) = @_;
 
@@ -330,12 +337,16 @@ sub _build_deparse_cache {
     my $Run_ref       = $asc_co->{'%Run'};
     my $Sub_count_ref = $gc_co->{'$Sub_count'};
     my $Seen_ref      = $dep_co->{'%Seen'};
+    my $Pod_ref       = $gc_co->{'$Pod'};
+    my $Pod_cache_ref = $gc_co->{'%Pod'};
 
     # Save originals so we can restore after cache building.
     my $save_Structure = $$Structure_ref;
     my $save_Coverage  = $$Coverage_ref;
     my %save_Run       = %$Run_ref;
     my $save_Sub_count = $$Sub_count_ref;
+    my $save_Pod       = $Pod_ref ? $$Pod_ref : undef;
+    my %save_Pod_cache = $Pod_cache_ref ? %$Pod_cache_ref : ();
     # %Seen suppresses duplicate statement/branch/condition discovery during deparse.
     # Without saving/restoring it, the real report pass would skip entries the cache
     # building pass already "saw", producing incorrect coverage.
@@ -343,11 +354,16 @@ sub _build_deparse_cache {
 
     # Set up throwaway state. Structure needs a real object (add_*_cover calls methods on it),
     # but it only accumulates in memory — disk writes happen during _report, which we don't call.
+    # get_cover() writes counts, vecs and digests into %Run directly, including POD coverage
+    # side effects which are not cached or replayed. Use a temporary run hash so those
+    # parent-prepass writes cannot contaminate the real run metadata populated by CHECK.
     require Devel::Cover::DB::Structure;
+    my @collected = Devel::Cover::get_coverage();
     my $tmp_base = "/tmp/dcf_cache_$$";
     $$Structure_ref = Devel::Cover::DB::Structure->new(base => $tmp_base);
+    $$Structure_ref->add_criteria(@collected);
     $$Coverage_ref  = {};
-    %$Run_ref       = (collected => [qw(statement branch condition subroutine time)]);
+    %$Run_ref       = (collected => \@collected);
     $$Sub_count_ref = {};
 
     # Intercept add_*_cover calls to record what each CV produces
@@ -462,6 +478,8 @@ sub _build_deparse_cache {
     %$Run_ref       = %save_Run;
     $$Sub_count_ref = $save_Sub_count;
     %$Seen_ref      = %save_Seen;
+    $$Pod_ref       = $save_Pod       if $Pod_ref;
+    %$Pod_cache_ref = %save_Pod_cache if $Pod_cache_ref;
 
     if ($build_err) {
         %$cache = ();

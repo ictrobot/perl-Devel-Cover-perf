@@ -273,6 +273,31 @@ of per-CV deep copies. CVs that produce no `add_*_cover` calls but do
 contribute `%Seen` entries are still cached (with an empty call list) so
 their duplicate-suppression state is replayed.
 
+### CI coverage comparison
+
+The harness writes two coverage artifacts with different purposes:
+
+- `summary.txt` is generated from the requested percentage criteria which are
+  safe to compare across runners: statement, branch, condition, subroutine, and
+  POD when requested. It deliberately uses the summary report, which excludes
+  raw execution counts, so it is compared to the stock `prove` baseline for
+  every runner mode, including `forkprove`.
+- `detailed.txt` is generated from the full requested criterion list and
+  includes raw counts. When `pod` is requested it also includes POD coverage.
+  This output is compared within the matching runner family: `opt` against
+  `baseline`, and `fork-opt` / `fork-opt-cache` against `fork`.
+
+The family split is necessary because forkprove preloads application modules in
+the parent. Devel::Cover counters from that preload are inherited by each child,
+so detailed raw counts for preload-time code are expected to differ from a
+plain `prove` run. If POD coverage is requested, stock `forkprove` can also
+produce different POD entries from the same tests under `prove`, as described
+in `REPORT.md`, unless the library path remains in process-global `@INC`.
+These checks use that `@INC` setup for all modes, so POD percentages in
+`summary.txt` are compared to the `prove` baseline, while detailed output is
+still compared against the corresponding stock runner rather than against a
+runner with different fork/preload counter semantics.
+
 ### CV sources and walk order
 
 CVs are walked in the same order as stock `_report` (unless `$Subs_only`

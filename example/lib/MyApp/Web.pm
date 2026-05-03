@@ -1,6 +1,7 @@
 package MyApp::Web;
 use Mojo::Base 'Mojolicious', -signatures;
 use MyApp::Container;
+use MyApp::PodFixturePreloaded ();
 
 sub startup ($self) {
     my $container = MyApp::Container->new->bootstrap;
