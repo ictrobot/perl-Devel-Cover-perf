@@ -166,12 +166,51 @@ print_failure_detail() {
     fi
 }
 
-read_mode_time() {
-    local time_file="$1/time.txt"
+read_mode_metric() {
+    local mode_dir="$1" key="$2"
+    local time_file="$mode_dir/time.txt"
     if [[ -f "$time_file" ]]; then
-        tail -n 1 "$time_file"
+        awk -v key="$key" '
+            {
+                for (i = 1; i <= NF; i++) {
+                    split($i, kv, "=")
+                    if (kv[1] == key) {
+                        print kv[2]
+                        found = 1
+                        exit
+                    }
+                }
+            }
+            END { if (!found) print "n/a" }
+        ' "$time_file"
     else
         echo "n/a"
+    fi
+}
+
+read_mode_elapsed() {
+    local time_file="$1/time.txt"
+    if [[ -f "$time_file" ]]; then
+        local elapsed
+        elapsed=$(read_mode_metric "$1" elapsed)
+        if [[ "$elapsed" != "n/a" ]]; then
+            echo "$elapsed"
+        else
+            tail -n 1 "$time_file"
+        fi
+    else
+        echo "n/a"
+    fi
+}
+
+read_mode_cpu() {
+    local user sys
+    user=$(read_mode_metric "$1" user)
+    sys=$(read_mode_metric "$1" sys)
+    if [[ "$user" == "n/a" || "$sys" == "n/a" ]]; then
+        echo "n/a"
+    else
+        awk -v user="$user" -v sys="$sys" 'BEGIN { printf "%.2f", user + sys }'
     fi
 }
 
@@ -253,9 +292,10 @@ while IFS= read -r cur_os; do
 
             m="${pid_mode[$finished_pid]}"
             mode_dir="${pid_dir[$finished_pid]}"
-            local_time=$(read_mode_time "$mode_dir")
+            local_elapsed=$(read_mode_elapsed "$mode_dir")
+            local_cpu=$(read_mode_cpu "$mode_dir")
             local_exit=$(read_mode_exit "$mode_dir")
-            log "  $m finished: ${local_time}s [exit $local_exit]"
+            log "  $m finished: elapsed=${local_elapsed}s cpu=${local_cpu}s [exit $local_exit]"
             if [[ "$local_exit" != "0" ]]; then
                 print_failure_detail "$mode_dir" "FAIL(exit $local_exit)" "$run_dir/baseline/summary.txt"
             fi
@@ -268,7 +308,8 @@ while IFS= read -r cur_os; do
         timing_line="${cur_os} DC $ver:"
         while IFS= read -r m; do
             mode_dir="$run_dir/$m"
-            local_time=$(read_mode_time "$mode_dir")
+            local_elapsed=$(read_mode_elapsed "$mode_dir")
+            local_cpu=$(read_mode_cpu "$mode_dir")
             local_exit=$(read_mode_exit "$mode_dir")
 
             if [[ "$local_exit" != "0" ]]; then
@@ -287,10 +328,10 @@ while IFS= read -r cur_os; do
             fi
 
             if [[ "$local_status" == "FAIL(coverage)" || "$local_status" == "FAIL(no baseline)" ]]; then
-                log "  $m comparison: ${local_time}s [$local_status]"
+                log "  $m comparison: elapsed=${local_elapsed}s cpu=${local_cpu}s [$local_status]"
                 print_failure_detail "$mode_dir" "$local_status" "$baseline_summary"
             fi
-            timing_line+="  $m=${local_time}s[$local_status]"
+            timing_line+="  $m=${local_elapsed}s[$local_status]"
         done <<< "$mode_list"
         summary_lines+=("$timing_line")
 

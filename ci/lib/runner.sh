@@ -70,7 +70,7 @@ cp -a /opt/example-src/* /opt/work/
 cover -delete -silent 2>/dev/null || true
 
 set +e
-/usr/bin/time -f '%e' -o /opt/output/time.txt \
+/usr/bin/time -f 'elapsed=%e user=%U sys=%S' -o /opt/output/time.txt \
     env PERL5OPT='${perl5opt}' ${runner_cmd} > /opt/output/test-output.txt 2>&1
 echo \$? > /opt/output/exit-code.txt
 set -e
