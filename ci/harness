@@ -24,7 +24,8 @@ Usage: $(basename "$0") [OPTIONS]
 Test Devel::Cover::Optimizer across DC versions and runner modes.
 
 Options:
-  --os OS              OS target: alma8, alma9, alma10, all (default: alma8)
+  --os OS              OS target: alma8, alma9, alma10, perl-stable, perl-devel, all (default: alma8)
+                       "all" runs alma* and perl-stable, but not perl-devel.
   --dc VERSION         DC version: specific version, "latest", or "all" (default: all)
   --dc-min VERSION     Minimum DC version when using --dc all (default: first in dc-versions.txt)
   --mode MODE          Mode: baseline, fork, opt, fork-opt, fork-opt-cache, all (default: all)
@@ -41,6 +42,8 @@ Examples:
   $(basename "$0") --dc 1.52                        # one DC version, all modes
   $(basename "$0") --dc 1.52 --mode baseline        # single permutation
   $(basename "$0") --dc-min 1.44                    # DC 1.44 through latest
+  $(basename "$0") --os perl-stable --dc latest     # official Perl stable image
+  $(basename "$0") --os perl-devel --dc latest      # official Perl development image canary
   $(basename "$0") --build-only                     # just build images
 EOF
     exit 0
@@ -98,7 +101,7 @@ resolve_modes() {
     fi
 }
 
-ALL_OS=(alma8 alma9 alma10)
+ALL_OS=(alma8 alma9 alma10 perl-stable)
 
 resolve_os_list() {
     if [[ "$os" == "all" ]]; then
@@ -113,6 +116,7 @@ os_dockerfile() {
     local os_name="$1"
     case "$os_name" in
         alma*) echo "$SCRIPT_DIR/docker/Dockerfile.alma" ;;
+        perl-*) echo "$SCRIPT_DIR/docker/Dockerfile.perl" ;;
         *)     echo "$SCRIPT_DIR/docker/Dockerfile.${os_name}" ;;
     esac
 }
@@ -121,6 +125,8 @@ os_build_args() {
     local os_name="$1"
     case "$os_name" in
         alma*) echo "--build-arg ALMA_VERSION=${os_name#alma}" ;;
+        perl-stable) echo "--build-arg PERL_TAG=stable" ;;
+        perl-devel)  echo "--build-arg PERL_TAG=devel" ;;
     esac
 }
 
@@ -139,8 +145,44 @@ if [[ -z "$output_dir" ]]; then
 fi
 mkdir -p "$output_dir"
 
-log() { echo "==> $*" >&2; }
+log() { echo "$*" >&2; }
 vlog() { (( verbose )) && echo "    $*" >&2 || true; }
+
+log "Output directory: $output_dir"
+
+print_failure_detail() {
+    local mode_dir="$1" status="$2"
+    local test_output="$mode_dir/test-output.txt"
+    local summary="$mode_dir/summary.txt"
+    local baseline="$3"
+
+    log "    output: $mode_dir"
+    if [[ "$status" == "FAIL(coverage)" && -f "$baseline" && -f "$summary" ]]; then
+        log "    coverage diff:"
+        diff -u "$baseline" "$summary" 2>&1 | sed 's/^/      /' >&2 || true
+    elif [[ -f "$test_output" ]]; then
+        log "    test output tail:"
+        tail -40 "$test_output" | sed 's/^/      /' >&2
+    fi
+}
+
+read_mode_time() {
+    local time_file="$1/time.txt"
+    if [[ -f "$time_file" ]]; then
+        tail -n 1 "$time_file"
+    else
+        echo "n/a"
+    fi
+}
+
+read_mode_exit() {
+    local exit_file="$1/exit-code.txt"
+    if [[ -f "$exit_file" ]]; then
+        cat "$exit_file"
+    else
+        echo "?"
+    fi
+}
 
 total_pass=0
 total_fail=0
@@ -189,17 +231,35 @@ while IFS= read -r cur_os; do
         log "${cur_os} DC $ver: running modes (parallel)"
 
         mode_pids=()
+        declare -A pid_mode=()
+        declare -A pid_dir=()
         while IFS= read -r m; do
             mode_dir="$run_dir/$m"
             (
                 run_mode "$tag" "$m" "$example" "$mode_dir" "$REPO_ROOT" "$jobs" || \
                     echo "2" > "$mode_dir/exit-code.txt"
             ) &
-            mode_pids+=($!)
+            pid=$!
+            mode_pids+=("$pid")
+            pid_mode[$pid]="$m"
+            pid_dir[$pid]="$mode_dir"
         done <<< "$mode_list"
 
-        for pid in "${mode_pids[@]}"; do
-            wait "$pid" 2>/dev/null || true
+        remaining=${#mode_pids[@]}
+        while (( remaining > 0 )); do
+            finished_pid=""
+            wait -n -p finished_pid 2>/dev/null || true
+            [[ -n "$finished_pid" ]] || break
+
+            m="${pid_mode[$finished_pid]}"
+            mode_dir="${pid_dir[$finished_pid]}"
+            local_time=$(read_mode_time "$mode_dir")
+            local_exit=$(read_mode_exit "$mode_dir")
+            log "  $m finished: ${local_time}s [exit $local_exit]"
+            if [[ "$local_exit" != "0" ]]; then
+                print_failure_detail "$mode_dir" "FAIL(exit $local_exit)" "$run_dir/baseline/summary.txt"
+            fi
+            remaining=$((remaining - 1))
         done
 
         # Compare each mode against baseline and build timing table
@@ -208,8 +268,8 @@ while IFS= read -r cur_os; do
         timing_line="${cur_os} DC $ver:"
         while IFS= read -r m; do
             mode_dir="$run_dir/$m"
-            local_time=$(cat "$mode_dir/time.txt" 2>/dev/null || echo "n/a")
-            local_exit=$(cat "$mode_dir/exit-code.txt" 2>/dev/null || echo "?")
+            local_time=$(read_mode_time "$mode_dir")
+            local_exit=$(read_mode_exit "$mode_dir")
 
             if [[ "$local_exit" != "0" ]]; then
                 local_status="FAIL(exit $local_exit)"
@@ -226,7 +286,10 @@ while IFS= read -r cur_os; do
                 local_status="PASS"
             fi
 
-            vlog "  $m: ${local_time}s ($local_status)"
+            if [[ "$local_status" == "FAIL(coverage)" || "$local_status" == "FAIL(no baseline)" ]]; then
+                log "  $m comparison: ${local_time}s [$local_status]"
+                print_failure_detail "$mode_dir" "$local_status" "$baseline_summary"
+            fi
             timing_line+="  $m=${local_time}s[$local_status]"
         done <<< "$mode_list"
         summary_lines+=("$timing_line")

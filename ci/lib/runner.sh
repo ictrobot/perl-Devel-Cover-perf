@@ -61,6 +61,12 @@ run_mode() {
         "$image" bash -c "
 set -euo pipefail
 cp -a /opt/example-src/* /opt/work/
+{
+    perl -V:version
+    perl -e 'require Devel::Cover; print qq{Devel::Cover \$Devel::Cover::VERSION\n}'
+    perl -e 'require App::ForkProve; print qq{App::ForkProve \$App::ForkProve::VERSION\n}'
+    perl -e 'require PadWalker; print qq{PadWalker \$PadWalker::VERSION\n}'
+} > /opt/output/versions.txt 2>&1
 cover -delete -silent 2>/dev/null || true
 
 set +e

@@ -9,6 +9,7 @@ requires 'DateTime';
 requires 'DBIx::Class';
 requires 'DBIx::Class::Schema::Loader';
 requires 'SQL::Translator';
+requires 'YAML';
 requires 'Config::Any';
 requires 'Moose';
 requires 'MooseX::NonMoose';

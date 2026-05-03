@@ -14,6 +14,7 @@ WriteMakefile(
         'DBIx::Class'          => 0,
         'DBIx::Class::Schema::Loader' => 0,
         'SQL::Translator'      => 0,
+        'YAML'                 => 0,
         'Config::Any'          => 0,
         'Moose'                => 0,
         'MooseX::NonMoose'     => 0,

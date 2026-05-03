@@ -41,7 +41,7 @@ RUN dnf clean all
 # Devel::Cover — last layer so everything above is cached across versions
 ARG DC_VERSION
 RUN cpanm --notest Devel::Cover@${DC_VERSION}
-RUN perl -MDevel::Cover -e \
-    "die qq{got \$Devel::Cover::VERSION, want ${DC_VERSION}\n} unless \$Devel::Cover::VERSION eq '${DC_VERSION}'"
+RUN DC_VERSION="${DC_VERSION}" perl -e \
+    'require Devel::Cover; die qq{got $Devel::Cover::VERSION, want $ENV{DC_VERSION}\n} unless $Devel::Cover::VERSION eq $ENV{DC_VERSION}'
 
 WORKDIR /opt/work
