@@ -9,14 +9,14 @@ pays ~0.25s in Devel::Cover cleanup — even for lightweight tests that don't
 use those modules. This overhead erases (and reverses) forkprove's compilation
 savings.
 
-## Observed Performance (model codebase: 130 libs, 115 tests)
+## Observed Performance (model codebase: 132 libs, 116 tests)
 
-| Mode               | Time  | Notes                           |
-|--------------------|-------|---------------------------------|
-| `prove`            | 9.9s  | baseline                        |
-| `forkprove`        | 7.2s  | 1.4x faster (preload saves ~3s) |
-| `prove + cover`    | 26.9s |                                 |
-| `forkprove + cover`| 36.0s | **slower** than prove + cover   |
+| Mode                | Time   | Notes                           |
+|---------------------|--------|---------------------------------|
+| `prove`             | 8.33s  | baseline                        |
+| `forkprove`         | 5.57s  | 1.5x faster (preload saves ~3s) |
+| `prove + cover`     | 24.59s |                                 |
+| `forkprove + cover` | 33.61s | **slower** than prove + cover   |
 
 ## Note on forkprove Coverage Counts
 
@@ -155,25 +155,25 @@ Measured by forking from a preloaded parent with Devel::Cover active:
 | `_report` → DB write      | 0.005s |
 | **Total per child**        | **0.25s** |
 
-At 115 tests: **28.75s** in `_report` alone.
+At 116 tests: **29.0s** in `_report` alone.
 
 ## Why forkprove + cover is Slower: The Math
 
 ```
 prove + cover:
-  Per-test _report:          ~0.05s × 115 = 5.75s
+  Per-test _report:          ~0.05s × 116 = 5.8s
   Per-test module compile:   ~0.18s × 69 heavy tests = 12.4s
-  Actual test execution + other overhead: ~8.8s
-  Total: ~27s ✓
+  Actual test execution + other overhead: ~6.4s
+  Total: ~24.6s ✓
 
 forkprove + cover:
-  Per-test _report:          ~0.25s × 115 = 28.75s  (preload bloats this)
+  Per-test _report:          ~0.25s × 116 = 29.0s  (preload bloats this)
   Per-test module compile:   0s (preloaded)
-  Actual test execution + other overhead: ~7.3s
-  Total: ~36s ✓
+  Actual test execution + other overhead: ~4.6s
+  Total: ~33.6s ✓
 
-Delta: forkprove loses 23s in _report, saves 12.4s from no recompile = 10.6s slower
-Actual: 9s slower ✓
+Delta: forkprove loses ~23s in _report, saves 12.4s from no recompile = ~11s slower
+Actual: ~9s slower ✓
 ```
 
 ## Potential Optimizations

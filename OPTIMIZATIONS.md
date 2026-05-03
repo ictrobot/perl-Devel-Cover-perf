@@ -48,37 +48,41 @@ default optimizer mode:
 - `cache` — enable optimization 2 (deparse cache, requires PadWalker)
 - `debug` — log all filtering decisions to STDERR
 
-## Benchmark Results (130 libs, 115 tests)
+## Benchmark Results (132 libs, 116 tests)
+
+Timings below are from sequential runs in the `dco-test/alma8:dc-1.52`
+container using Devel::Cover's default report criteria for this repository:
+statement, branch, condition, and subroutine.
 
 ### Baselines (no coverage)
 
 | Runner       | Time  |
 |--------------|-------|
-| `prove`      | 9.7s  |
-| `forkprove`  | 7.5s  |
+| `prove`      | 8.33s |
+| `forkprove`  | 5.57s |
 
 ### Default mode (optimization 1)
 
 | Configuration              | `prove`    | `forkprove` |
 |----------------------------|------------|-------------|
-| stock (no Optimizer)          | 27.4s      | 36.1s       |
-| **Devel::Cover::Optimizer**   | **22.2s**  | **24.9s**   |
+| stock (no Optimizer)          | 24.59s     | 33.61s      |
+| **Devel::Cover::Optimizer**   | **20.28s** | **24.75s**  |
 
-**-19%** with `prove` and **-31%** with `forkprove` vs stock. With Optimizer,
-`forkprove + cover` (24.9s) is faster than `prove + cover` stock (27.4s).
+**-18%** with `prove` and **-26%** with `forkprove` vs stock.
 
 ### With `cache` (optimizations 1+2, requires PadWalker)
 
 | Configuration              | `prove`    | `forkprove` |
 |----------------------------|------------|-------------|
-| stock (no Optimizer)          | 27.4s      | 36.1s       |
-| Optimizer (no cache)          | 22.2s      | 24.9s       |
-| **Optimizer + cache**         | **22.2s**  | **18.0s**   |
+| stock (no Optimizer)          | 24.59s     | 33.61s      |
+| Optimizer (no cache)          | 20.28s     | 24.75s      |
+| Optimizer + cache             | 24.82s     | **15.83s**  |
 
-The cache has minimal impact under `prove` (each child starts fresh, nothing
-to pre-cache), but under `forkprove` it eliminates ~7s of redundant
-`B::Deparse` work inherited from the preloaded parent — a **-50%** reduction
-vs stock and **-28%** vs Optimizer without cache.
+The cache is intended for `forkprove`. Under plain `prove`, each test process
+starts fresh and there is no preloaded parent state to reuse, so cache-building
+overhead makes the run slower. Under `forkprove` it eliminates ~9s of redundant
+`B::Deparse` work inherited from the preloaded parent — a **-53%** reduction
+vs stock and **-36%** vs Optimizer without cache.
 
 ## Optimization 1: Replace walksymtable with filtered version
 
