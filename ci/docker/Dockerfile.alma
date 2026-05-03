@@ -1,0 +1,47 @@
+ARG ALMA_VERSION=8
+FROM almalinux:${ALMA_VERSION}
+
+RUN dnf -y install epel-release dnf-plugins-core && \
+    crb enable && \
+    dnf -y install perl perl-App-cpanminus perl-devel perl-LWP-Protocol-https gcc make time
+
+# Example app deps — try system RPM first, fall back to cpanm.
+# perl(Foo::Bar) uses RPM virtual provides to resolve the right package.
+RUN dnf -y install 'perl(Moo)' || cpanm --notest --skip-satisfied Moo
+RUN dnf -y install 'perl(Type::Tiny)' || cpanm --notest --skip-satisfied Type::Tiny
+RUN dnf -y install 'perl(Mojolicious)' || cpanm --notest --skip-satisfied Mojolicious
+RUN dnf -y install 'perl(namespace::autoclean)' || cpanm --notest --skip-satisfied namespace::autoclean
+RUN dnf -y install 'perl(JSON::MaybeXS)' || cpanm --notest --skip-satisfied JSON::MaybeXS
+RUN dnf -y install 'perl(Template)' || cpanm --notest --skip-satisfied Template
+RUN dnf -y install 'perl(XML::LibXML)' || cpanm --notest --skip-satisfied XML::LibXML
+RUN dnf -y install 'perl(DateTime)' || cpanm --notest --skip-satisfied DateTime
+RUN dnf -y install 'perl(DBIx::Class)' || cpanm --notest --skip-satisfied DBIx::Class
+RUN dnf -y install 'perl(DBIx::Class::Schema::Loader)' || cpanm --notest --skip-satisfied DBIx::Class::Schema::Loader
+RUN dnf -y install 'perl(SQL::Translator)' || cpanm --notest --skip-satisfied SQL::Translator
+RUN dnf -y install 'perl(Config::Any)' || cpanm --notest --skip-satisfied Config::Any
+RUN dnf -y install 'perl(Moose)' || cpanm --notest --skip-satisfied Moose
+RUN dnf -y install 'perl(MooseX::NonMoose)' || cpanm --notest --skip-satisfied MooseX::NonMoose
+RUN dnf -y install 'perl(MooseX::MarkAsMethods)' || cpanm --notest --skip-satisfied MooseX::MarkAsMethods
+RUN dnf -y install 'perl(Data::UUID)' || cpanm --notest --skip-satisfied Data::UUID
+RUN dnf -y install 'perl(Digest::SHA)' || cpanm --notest --skip-satisfied Digest::SHA
+RUN dnf -y install 'perl(Time::Piece)' || cpanm --notest --skip-satisfied Time::Piece
+
+# Test deps
+RUN dnf -y install 'perl(Test::More)' || cpanm --notest --skip-satisfied Test::More
+RUN dnf -y install 'perl(Test::Exception)' || cpanm --notest --skip-satisfied Test::Exception
+RUN dnf -y install 'perl(Test::Deep)' || cpanm --notest --skip-satisfied Test::Deep
+RUN dnf -y install 'perl(Test::Mojo)' || cpanm --notest --skip-satisfied Test::Mojo
+
+# Tools needed by the optimizer
+RUN dnf -y install 'perl(PadWalker)' || cpanm --notest --skip-satisfied PadWalker
+RUN cpanm --notest --skip-satisfied App::ForkProve
+
+RUN dnf clean all
+
+# Devel::Cover — last layer so everything above is cached across versions
+ARG DC_VERSION
+RUN cpanm --notest Devel::Cover@${DC_VERSION}
+RUN perl -MDevel::Cover -e \
+    "die qq{got \$Devel::Cover::VERSION, want ${DC_VERSION}\n} unless \$Devel::Cover::VERSION eq '${DC_VERSION}'"
+
+WORKDIR /opt/work

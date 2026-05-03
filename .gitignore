@@ -1,5 +1,7 @@
 .idea
 *.iml
+_Deparsed_XSubs.pm
 cover_db
 nytprof*
 .codex
+ci/output/

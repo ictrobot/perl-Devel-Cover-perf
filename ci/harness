@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+source "$SCRIPT_DIR/lib/runner.sh"
+
+# Defaults
+os="alma8"
+dc_version="all"
+dc_min=""
+mode="all"
+example="example"
+build_only=0
+jobs=1
+output_dir=""
+verbose=0
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Test Devel::Cover::Optimizer across DC versions and runner modes.
+
+Options:
+  --os OS              OS target: alma8, alma9, alma10, all (default: alma8)
+  --dc VERSION         DC version: specific version, "latest", or "all" (default: all)
+  --dc-min VERSION     Minimum DC version when using --dc all (default: first in dc-versions.txt)
+  --mode MODE          Mode: baseline, fork, opt, fork-opt, fork-opt-cache, all (default: all)
+                       Debug modes: opt-no-walksymtable, fork-opt-no-walksymtable
+  --example DIR        Example dir relative to repo root (default: example)
+  --build-only         Build Docker images only, don't run tests
+  --jobs N             Parallel test jobs passed to prove/forkprove -jN (default: 1)
+  --output DIR         Output directory (default: ci/output/<timestamp>)
+  -v, --verbose        Verbose output
+  -h, --help           Show this help
+
+Examples:
+  $(basename "$0")                                  # run all DC versions, all modes
+  $(basename "$0") --dc 1.52                        # one DC version, all modes
+  $(basename "$0") --dc 1.52 --mode baseline        # single permutation
+  $(basename "$0") --dc-min 1.44                    # DC 1.44 through latest
+  $(basename "$0") --build-only                     # just build images
+EOF
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --os)         os="$2"; shift 2 ;;
+        --dc)         dc_version="$2"; shift 2 ;;
+        --dc-min)     dc_min="$2"; shift 2 ;;
+        --mode)       mode="$2"; shift 2 ;;
+        --example)    example="$2"; shift 2 ;;
+        --build-only) build_only=1; shift ;;
+        --jobs|-j)    jobs="$2"; shift 2 ;;
+        --output)     output_dir="$2"; shift 2 ;;
+        -v|--verbose) verbose=1; shift ;;
+        -h|--help)    usage ;;
+        *)            echo "Unknown option: $1" >&2; usage ;;
+    esac
+done
+
+# Resolve DC versions
+dc_versions_file="$SCRIPT_DIR/dc-versions.txt"
+if [[ ! -f "$dc_versions_file" ]]; then
+    echo "ERROR: $dc_versions_file not found" >&2
+    exit 2
+fi
+
+resolve_dc_versions() {
+    if [[ "$dc_version" == "all" ]]; then
+        if [[ -n "$dc_min" ]]; then
+            awk -v min="$dc_min" '
+                function vercmp(a, b,   sa, sb) {
+                    split(a, sa, "."); split(b, sb, ".")
+                    if (sa[1]+0 != sb[1]+0) return sa[1]+0 - sb[1]+0
+                    return sa[2]+0 - sb[2]+0
+                }
+                vercmp($0, min) >= 0 { print }
+            ' "$dc_versions_file"
+        else
+            cat "$dc_versions_file"
+        fi
+    elif [[ "$dc_version" == "latest" ]]; then
+        tail -1 "$dc_versions_file"
+    else
+        echo "$dc_version"
+    fi
+}
+
+resolve_modes() {
+    if [[ "$mode" == "all" ]]; then
+        printf '%s\n' "${ALL_MODES[@]}"
+    else
+        echo "$mode"
+    fi
+}
+
+ALL_OS=(alma8 alma9 alma10)
+
+resolve_os_list() {
+    if [[ "$os" == "all" ]]; then
+        printf '%s\n' "${ALL_OS[@]}"
+    else
+        echo "$os"
+    fi
+}
+
+# Map OS name to Dockerfile and build args
+os_dockerfile() {
+    local os_name="$1"
+    case "$os_name" in
+        alma*) echo "$SCRIPT_DIR/docker/Dockerfile.alma" ;;
+        *)     echo "$SCRIPT_DIR/docker/Dockerfile.${os_name}" ;;
+    esac
+}
+
+os_build_args() {
+    local os_name="$1"
+    case "$os_name" in
+        alma*) echo "--build-arg ALMA_VERSION=${os_name#alma}" ;;
+    esac
+}
+
+dc_list=$(resolve_dc_versions)
+mode_list=$(resolve_modes)
+os_list=$(resolve_os_list)
+
+if [[ -z "$dc_list" ]]; then
+    echo "ERROR: no DC versions selected" >&2
+    exit 2
+fi
+
+# Output directory
+if [[ -z "$output_dir" ]]; then
+    output_dir="$SCRIPT_DIR/output/$(date +%Y%m%d-%H%M%S)"
+fi
+mkdir -p "$output_dir"
+
+log() { echo "==> $*" >&2; }
+vlog() { (( verbose )) && echo "    $*" >&2 || true; }
+
+total_pass=0
+total_fail=0
+summary_lines=()
+
+while IFS= read -r cur_os; do
+    dockerfile=$(os_dockerfile "$cur_os")
+    if [[ ! -f "$dockerfile" ]]; then
+        echo "ERROR: Dockerfile not found: $dockerfile" >&2
+        exit 2
+    fi
+    build_args=$(os_build_args "$cur_os")
+    image_prefix="dco-test/${cur_os}"
+
+    # --- Phase 1: Build images (sequential to maximise layer reuse) ---
+    log "Building images for ${cur_os} ($(echo "$dc_list" | wc -l | tr -d ' ') DC versions)"
+
+    while IFS= read -r ver; do
+        tag="${image_prefix}:dc-${ver}"
+        log_file="${output_dir}/${cur_os}/build-dc-${ver}.log"
+        mkdir -p "$(dirname "$log_file")"
+
+        if docker build \
+            --load \
+            --build-arg "DC_VERSION=${ver}" \
+            $build_args \
+            -t "$tag" \
+            -f "$dockerfile" \
+            "$REPO_ROOT" > "$log_file" 2>&1; then
+            vlog "built: $tag"
+        else
+            log "FAIL: ${cur_os} DC $ver failed to build (see $log_file)"
+            exit 2
+        fi
+    done <<< "$dc_list"
+
+    if (( build_only )); then
+        continue
+    fi
+
+    # --- Phase 2: Run tests ---
+    while IFS= read -r ver; do
+        tag="${image_prefix}:dc-${ver}"
+        run_dir="${output_dir}/${cur_os}/dc-${ver}/${example}"
+
+        log "${cur_os} DC $ver: running modes (parallel)"
+
+        mode_pids=()
+        while IFS= read -r m; do
+            mode_dir="$run_dir/$m"
+            (
+                run_mode "$tag" "$m" "$example" "$mode_dir" "$REPO_ROOT" "$jobs" || \
+                    echo "2" > "$mode_dir/exit-code.txt"
+            ) &
+            mode_pids+=($!)
+        done <<< "$mode_list"
+
+        for pid in "${mode_pids[@]}"; do
+            wait "$pid" 2>/dev/null || true
+        done
+
+        # Compare each mode against baseline and build timing table
+        baseline_summary="$run_dir/baseline/summary.txt"
+        ver_failed=0
+        timing_line="${cur_os} DC $ver:"
+        while IFS= read -r m; do
+            mode_dir="$run_dir/$m"
+            local_time=$(cat "$mode_dir/time.txt" 2>/dev/null || echo "n/a")
+            local_exit=$(cat "$mode_dir/exit-code.txt" 2>/dev/null || echo "?")
+
+            if [[ "$local_exit" != "0" ]]; then
+                local_status="FAIL(exit $local_exit)"
+                ver_failed=1
+            elif [[ "$mode" != "all" || "$m" == "baseline" ]]; then
+                local_status="PASS"
+            elif [[ ! -f "$baseline_summary" ]]; then
+                local_status="FAIL(no baseline)"
+                ver_failed=1
+            elif ! diff -q "$baseline_summary" "$mode_dir/summary.txt" &>/dev/null; then
+                local_status="FAIL(coverage)"
+                ver_failed=1
+            else
+                local_status="PASS"
+            fi
+
+            vlog "  $m: ${local_time}s ($local_status)"
+            timing_line+="  $m=${local_time}s[$local_status]"
+        done <<< "$mode_list"
+        summary_lines+=("$timing_line")
+
+        if (( ver_failed )); then
+            log "${cur_os} DC $ver: FAIL"
+            total_fail=$((total_fail + 1))
+        else
+            log "${cur_os} DC $ver: PASS"
+            total_pass=$((total_pass + 1))
+        fi
+
+    done <<< "$dc_list"
+done <<< "$os_list"
+
+# --- Summary ---
+if (( build_only )); then
+    log "Build-only mode, done."
+    exit 0
+fi
+
+log ""
+log "=== Summary ==="
+for line in "${summary_lines[@]}"; do
+    log "$line"
+done
+log ""
+log "Passed: $total_pass  Failed: $total_fail"
+
+if (( total_fail > 0 )); then
+    log "RESULT: FAIL"
+    exit 1
+else
+    log "RESULT: PASS"
+    exit 0
+fi
