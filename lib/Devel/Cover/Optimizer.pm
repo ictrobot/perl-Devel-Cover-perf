@@ -271,10 +271,10 @@ sub _install_deparse_cache {
                     local $Devel::Cover::Line = $c->{line};
                     $c->{func}->(@{$c->{args}});
                 }
-                # Replay %Seen delta so later non-cached CVs see the same
+                # Replay %Seen increments so later non-cached CVs see the same
                 # duplicate-suppression state as a non-cached run.
                 while (my ($type, $ops) = each %{$entry->{seen}}) {
-                    @{$Seen_ref->{$type}}{keys %$ops} = values %$ops;
+                    $Seen_ref->{$type}{$_} += $ops->{$_} for keys %$ops;
                 }
                 return "";
             }
@@ -301,9 +301,10 @@ sub _install_deparse_cache {
 # CVs are walked in the same order as stock _report: main_cv,
 # begin_av, check_av, get_ends, then @Cvs (from check_files).
 # %Seen accumulates persistently across CVs (cleared once at the
-# start, not per-CV), matching stock behavior. After each CV we
-# compute the %Seen delta and store only that with the cache entry.
-# During replay, children merge the delta to preserve duplicate-
+# start, not per-CV), matching stock behavior. During cache building we
+# tie %Seen so writes are tracked as two-level numeric deltas. After each CV we
+# take the increments since the previous CV and store them with the cache entry.
+# During replay, children add the increments to preserve duplicate-
 # suppression semantics without re-deparsing.
 #
 # The challenge is that get_cover() and add_*_cover() depend on Devel::Cover's
@@ -413,7 +414,9 @@ sub _build_deparse_cache {
         # Walk CVs in the same order as stock _report (see Devel::Cover lines 748-763).
         # %Seen accumulates persistently across CVs, matching stock behavior.
         %$Seen_ref = ();
-        my %seen_shadow;
+        my %seen_data;
+        my $seen_tracker = tie %$Seen_ref, __PACKAGE__ . "::_TwoLevelDeltaHash",
+            data => \%seen_data;
 
         # Build CV list in stock _report order.
         my @report_cvs;
@@ -446,7 +449,7 @@ sub _build_deparse_cache {
                 next;
             }
 
-            my $seen_delta = _seen_delta($Seen_ref, \%seen_shadow);
+            my $seen_delta = $seen_tracker->take_delta;
 
             # main_cv is not keyed by CV address — skip caching it, but its
             # %Seen and call effects have already accumulated.
@@ -478,6 +481,8 @@ sub _build_deparse_cache {
     $$Coverage_ref  = $save_Coverage;
     %$Run_ref       = %save_Run;
     $$Sub_count_ref = $save_Sub_count;
+    tied(%$Seen_ref)->drop_inner_cache if tied %$Seen_ref;
+    untie %$Seen_ref if tied %$Seen_ref;
     %$Seen_ref      = %save_Seen;
     $$Pod_ref       = $save_Pod       if $Pod_ref;
     %$Pod_cache_ref = %save_Pod_cache if $Pod_cache_ref;
@@ -500,20 +505,6 @@ sub _build_deparse_cache {
     return $Seen_ref;
 }
 
-sub _seen_delta {
-    my ($seen, $shadow) = @_;
-    my %delta;
-    for my $type (keys %$seen) {
-        for my $op (keys %{$seen->{$type}}) {
-            my $val = $seen->{$type}{$op};
-            next if exists $shadow->{$type}{$op}
-                 && $shadow->{$type}{$op} == $val;
-            $delta{$type}{$op} = $val;
-            $shadow->{$type}{$op} = $val;
-        }
-    }
-    return \%delta;
-}
 
 # Return true when a %INC key should make us descend into the corresponding
 # package stash. We only ask Devel::Cover::use_file about values that look like
@@ -548,6 +539,147 @@ sub _cv_file {
     my $op = $cv->START;
     return unless ref($op) eq "B::COP";
     $op->file;
+}
+
+# Tracks writes to Devel::Cover's two-level %Seen hash as numeric deltas,
+# without scanning the whole accumulated hash after every CV while building the
+# deparse cache.
+package Devel::Cover::Optimizer::_TwoLevelDeltaHash;
+use strict;
+use warnings;
+
+sub TIEHASH {
+    my ($class, %args) = @_;
+
+    my $data = $args{data} // {};
+
+    return bless {
+        data  => $data,
+        delta => {},
+        cache => {},
+    }, $class;
+}
+
+sub FETCH {
+    my ($self, $k1) = @_;
+
+    return $self->{cache}{$k1} if exists $self->{cache}{$k1};
+
+    tie my %inner, "Devel::Cover::Optimizer::_TwoLevelDeltaHash::Inner", $self, $k1;
+    return $self->{cache}{$k1} = \%inner;
+}
+
+sub STORE {
+    my ($self, $k1, $value) = @_;
+    die "Devel::Cover::Optimizer: \%Seen tracker only supports hashref values\n"
+        unless ref($value) eq "HASH";
+
+    $self->{data}{$k1} //= {};
+    $self->_set($k1, $_, $value->{$_}) for keys %$value;
+    return $value;
+}
+
+sub EXISTS {
+    my ($self, $k1) = @_;
+    return exists $self->{data}{$k1};
+}
+
+sub FIRSTKEY {
+    my ($self) = @_;
+    keys %{$self->{data}};
+    return each %{$self->{data}};
+}
+
+sub NEXTKEY {
+    my ($self) = @_;
+    return each %{$self->{data}};
+}
+
+sub DELETE {
+    die "Devel::Cover::Optimizer: \%Seen tracker does not support delete\n";
+}
+
+sub CLEAR {
+    die "Devel::Cover::Optimizer: \%Seen tracker does not support clear\n";
+}
+
+sub take_delta {
+    my ($self) = @_;
+
+    my $delta = $self->{delta};
+    $self->{delta} = {};
+
+    return $delta;
+}
+
+sub drop_inner_cache {
+    my ($self) = @_;
+    $self->{cache} = {};
+    return;
+}
+
+sub _set {
+    my ($self, $k1, $k2, $new) = @_;
+
+    $self->{data}{$k1} //= {};
+    my $current = $self->{data}{$k1};
+
+    my $old = exists $current->{$k2} && defined $current->{$k2}
+        ? $current->{$k2}
+        : 0;
+    my $diff = (defined $new ? $new : 0) - $old;
+    $current->{$k2} = $new;
+    $self->{delta}{$k1}{$k2} += $diff if $diff;
+
+    return $new;
+}
+
+package Devel::Cover::Optimizer::_TwoLevelDeltaHash::Inner;
+use strict;
+use warnings;
+
+sub TIEHASH {
+    my ($class, $outer, $k1) = @_;
+    return bless { outer => $outer, k1 => $k1 }, $class;
+}
+
+sub FETCH {
+    my ($self, $k2) = @_;
+    my $data = $self->{outer}{data}{ $self->{k1} };
+    return unless $data;
+    return $data->{$k2};
+}
+
+sub STORE {
+    my ($self, $k2, $value) = @_;
+    return $self->{outer}->_set($self->{k1}, $k2, $value);
+}
+
+sub EXISTS {
+    my ($self, $k2) = @_;
+    my $data = $self->{outer}{data}{ $self->{k1} };
+    return $data && exists $data->{$k2};
+}
+
+sub FIRSTKEY {
+    my ($self) = @_;
+    my $data = $self->{outer}{data}{ $self->{k1} } || {};
+    keys %$data;
+    return each %$data;
+}
+
+sub NEXTKEY {
+    my ($self) = @_;
+    my $data = $self->{outer}{data}{ $self->{k1} } || {};
+    return each %$data;
+}
+
+sub DELETE {
+    die "Devel::Cover::Optimizer: \%Seen tracker does not support delete\n";
+}
+
+sub CLEAR {
+    die "Devel::Cover::Optimizer: \%Seen tracker does not support clear\n";
 }
 
 1;
