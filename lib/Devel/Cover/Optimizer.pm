@@ -24,25 +24,39 @@ use warnings;
 # Usage:
 #   perl -MDevel::Cover=... -MDevel::Cover::Optimizer ...
 #   perl -MDevel::Cover=... -MDevel::Cover::Optimizer=debug ...
+#   perl -MDevel::Cover=... -MDevel::Cover::Optimizer=cache,debug2 ...
 #
 # Options:
 #   no_walksymtable        — disable optimization 1 (walksymtable replacement)
 #   cache                  — pre-cache deparse walks for preloaded CVs (requires PadWalker)
-#   debug                  — log all filtering decisions to STDERR
+#   debug                  — log summary diagnostics to STDERR
+#   debug2                 — log cache/walk phases and aggregate detail
+#   debug3                 — log verbose per-package and per-CV detail
 
 
 sub import {
     my ($class, @args) = @_;
-    my %opts = map { $_ => 1 } @args;
+    my %opts;
+    my $debug = 0;
+    for my $arg (@args) {
+        # debug2/debug3 work cleanly via -MDevel::Cover::Optimizer=cache,debug2.
+        # debug=N is also accepted for callers that invoke import directly.
+        if ($arg =~ /\Adebug(?:=(\d+))?\z/) {
+            $debug = defined $1 ? $1 : 1;
+        } elsif ($arg =~ /\Adebug([0-9]\d*)\z/) {
+            $debug = $1;
+        } else {
+            $opts{$arg} = 1;
+        }
+    }
 
     unless (defined $Devel::Cover::VERSION) {
         die "Devel::Cover::Optimizer: Devel::Cover is not loaded\n";
     }
 
-    # Ensure $debug is 0/1 as it is interpolated into an eval
-    my $debug = delete $opts{debug} ? 1 : 0;
     if ($debug) {
-        warn "Devel::Cover::Optimizer: debug enabled (Perl $], Devel::Cover $Devel::Cover::VERSION"
+        warn "Devel::Cover::Optimizer: debug level $debug enabled"
+            . " (Perl $], Devel::Cover $Devel::Cover::VERSION"
             . ($B::Deparse::VERSION ? ", B::Deparse $B::Deparse::VERSION" : "")
             . ")\n";
     }
@@ -129,7 +143,7 @@ sub import {
                         $must_descend{$pfx} = 1;
                     }
                 }
-                if ($debug) {
+                if ($debug >= 2) {
                     my $total_inc = scalar keys %INC;
                     my $n = scalar keys %must_descend;
                     warn "  [walk] %INC: $total_inc entries, must_descend: $n prefixes\n";
@@ -152,8 +166,8 @@ sub import {
                     $mod =~ s!::!/!g;
                     my $self_requires_descend = _inc_requires_descend($mod);
                     my $descend = $self_requires_descend || $must_descend{$pkg} || $ancestor_matched;
-                    if ($debug) {
-                        warn $descend ? "  [walk] descend $pkg\n" : "  [walk] skip subtree $pkg\n";
+                    if ($debug >= 3) {
+                        warn($descend ? "  [walk] descend $pkg\n" : "  [walk] skip subtree $pkg\n");
                     }
                     next unless $descend;
 
@@ -163,7 +177,7 @@ sub import {
                     my $cv = $gv->CV;
                     # $$cv is the internal pointer address — 0 means no CV is attached to this glob.
                     next unless $$cv;
-                    if ($debug) {
+                    if ($debug >= 3) {
                         my $file = _cv_file($cv) // '?';
                         warn "  [walk] find_cv ${prefix}${sym} ($file)\n";
                     }
@@ -231,6 +245,9 @@ sub import {
 sub _install_deparse_cache {
     my ($debug) = @_;
 
+    my $install_start = $debug ? _time() : 0;
+    warn "  [cache] install: starting in phase ${^GLOBAL_PHASE}\n" if $debug;
+
     my $rpt_co = PadWalker::closed_over(\&Devel::Cover::_report);
 
     # %Coverage gates the deparse walker's discovery logic. It starts as (all => 1) and
@@ -245,13 +262,21 @@ sub _install_deparse_cache {
     # Populate @Cvs with currently-loaded CVs from selected packages. Stock Devel::Cover
     # calls this in CHECK and again in _report; we call it here so the cache sees all CVs
     # loaded by this point (important when forkprove preloads after CHECK).
+    my $check_files_start = $debug ? _time() : 0;
     Devel::Cover::check_files();
     my $Cvs_ref      = $rpt_co->{'@Cvs'};
     my $Subs_only_ref = $rpt_co->{'$Subs_only'};
+    if ($debug) {
+        warn sprintf "  [cache] check_files: %.3fs, %d CVs selected\n",
+            _time() - $check_files_start, scalar @$Cvs_ref;
+    }
 
     my %cache;
+    my $build_start = $debug ? _time() : 0;
     my $Seen_ref = _build_deparse_cache(\%cache, $Cvs_ref, $Subs_only_ref, $debug);
+    my $build_elapsed = $debug ? _time() - $build_start : 0;
 
+    warn "  [cache] install: no cache entries built\n" if $debug && !%cache;
     return unless %cache;
 
     my $Structure_ref =
@@ -259,19 +284,29 @@ sub _install_deparse_cache {
     my $orig_deparse_sub = \&B::Deparse::deparse_sub;
     my $cache_hits = 0;
     my $cache_misses = 0;
+    my $cache_stale_misses = 0;
+    my $replay_calls = 0;
+    my $replay_time = 0;
+    my $uncached_time = 0;
 
     no warnings 'redefine';
     *B::Deparse::deparse_sub = sub {
         my $cv = $_[1];
-        if ($$Structure_ref && ref($cv) && $cv->isa("B::CV") && exists $cache{$$cv}) {
+        my $is_cover_get_cover = 0;
+        if ($$Structure_ref && ref($cv) && $cv->isa("B::CV")) {
             # caller(1) is the frame that invoked this deparse_sub wrapper.
             my $caller_sub = (caller(1))[3] // "";
+            $is_cover_get_cover = $caller_sub eq "Devel::Cover::get_cover";
+        }
+
+        if ($is_cover_get_cover && exists $cache{$$cv}) {
             my $entry = $cache{$$cv};
-            if ($caller_sub eq "Devel::Cover::get_cover"
-                && ${$cv->START} == $entry->{start}
+            if (${$cv->START} == $entry->{start}
                 && ${$cv->ROOT} == $entry->{root})
             {
-                $cache_hits++;
+                my $replay_start = $debug ? _time() : 0;
+                $cache_hits++ if $debug;
+                $replay_calls += scalar @{$entry->{calls}} if $debug;
                 for my $c (@{$entry->{calls}}) {
                     local $Devel::Cover::File = $c->{file};
                     local $Devel::Cover::Line = $c->{line};
@@ -282,18 +317,61 @@ sub _install_deparse_cache {
                 while (my ($type, $ops) = each %{$entry->{seen}}) {
                     $Seen_ref->{$type}{$_} += $ops->{$_} for keys %$ops;
                 }
+                $replay_time += _time() - $replay_start if $debug;
                 return "";
             }
+            $cache_stale_misses++ if $debug;
         }
-        $cache_misses++;
+
+        if ($is_cover_get_cover) {
+            # Stale cache entries are counted above as stale, then here as
+            # misses too, because they fall back to the uncached deparse path.
+            my $uncached_start = $debug ? _time() : 0;
+            $cache_misses++ if $debug;
+            my $deparsed = $orig_deparse_sub->(@_);
+            $uncached_time += _time() - $uncached_start if $debug;
+            return $deparsed;
+        }
+
         $orig_deparse_sub->(@_);
     };
 
     if ($debug) {
+        warn sprintf "  [cache] install: ready in %.3fs (build %.3fs, entries %d)\n",
+            _time() - $install_start, $build_elapsed, scalar keys %cache;
+    }
+
+    if ($debug) {
         my $orig_report = \&Devel::Cover::report;
+        my $log_replay_summary = sub {
+            my ($report_start) = @_;
+            warn sprintf(
+                "  [cache] replay: hits=%d misses=%d stale=%d calls=%d replay_time=%.3fs uncached_time=%.3fs report_time=%.3fs\n",
+                $cache_hits,
+                $cache_misses,
+                $cache_stale_misses,
+                $replay_calls,
+                $replay_time,
+                $uncached_time,
+                _time() - $report_start,
+            );
+        };
         *Devel::Cover::report = sub {
-            $orig_report->(@_);
-            warn "  [cache] replay: $cache_hits hits, $cache_misses misses\n";
+            my $report_start = _time();
+            my $wantarray = wantarray;
+            if ($wantarray) {
+                my @ret = $orig_report->(@_);
+                $log_replay_summary->($report_start);
+                return @ret;
+            } elsif (defined $wantarray) {
+                my $ret = $orig_report->(@_);
+                $log_replay_summary->($report_start);
+                return $ret;
+            } else {
+                $orig_report->(@_);
+                $log_replay_summary->($report_start);
+                return;
+            }
         };
     }
 }
@@ -335,6 +413,9 @@ sub _install_deparse_cache {
 sub _build_deparse_cache {
     my ($cache, $Cvs_ref, $Subs_only_ref, $debug) = @_;
 
+    my $build_start = $debug ? _time() : 0;
+    warn "  [cache] build: locating Devel::Cover state\n" if $debug >= 2;
+
     my $asc_co = PadWalker::closed_over(\&Devel::Cover::add_statement_cover);
     my $gc_co  = PadWalker::closed_over(\&Devel::Cover::get_cover);
     my $rpt_co = PadWalker::closed_over(\&Devel::Cover::_report);
@@ -367,6 +448,8 @@ sub _build_deparse_cache {
     # parent-prepass writes cannot contaminate the real run metadata populated by CHECK.
     require Devel::Cover::DB::Structure;
     my @collected = Devel::Cover::get_coverage();
+    warn "  [cache] build: creating temporary structure for " . join(",", @collected) . "\n"
+        if $debug >= 2;
     my $tmp_base = "/tmp/dcf_cache_$$";
     $$Structure_ref = Devel::Cover::DB::Structure->new(base => $tmp_base);
     $$Structure_ref->add_criteria(@collected);
@@ -380,6 +463,20 @@ sub _build_deparse_cache {
     my $orig_add_stmt = \&Devel::Cover::add_statement_cover;
     my $orig_add_br   = \&Devel::Cover::add_branch_cover;
     my $orig_add_cond = \&Devel::Cover::add_condition_cover;
+    my %stats = (
+        candidates       => 0,
+        cached           => 0,
+        calls            => 0,
+        duplicates       => 0,
+        empty            => 0,
+        failed           => 0,
+        invalid_cv       => 0,
+        main             => 0,
+        no_root          => 0,
+        processed        => 0,
+        seen_entries     => 0,
+        seen_only        => 0,
+    );
 
     eval {
         no warnings 'redefine';
@@ -439,9 +536,29 @@ sub _build_deparse_cache {
         }
         push @report_cvs, map ['cv', $_], @$Cvs_ref;
 
+        $stats{candidates} = scalar @report_cvs;
+        if ($debug >= 2) {
+            warn sprintf(
+                "  [cache] build: processing %d report CV entries (%d from check_files)\n",
+                $stats{candidates},
+                scalar @$Cvs_ref,
+            );
+        }
+
+        my $progress_every = 500;
         for my $item (@report_cvs) {
+            $stats{processed}++;
+            if ($debug >= 2 && $stats{processed} % $progress_every == 0) {
+                warn sprintf(
+                    "  [cache] build: progress %d/%d entries, %d cached\n",
+                    $stats{processed},
+                    $stats{candidates},
+                    $stats{cached},
+                );
+            }
             @calls = ();
 
+            my $cv_start = $debug >= 3 ? _time() : 0;
             my $ok = eval {
                 if ($item->[0] eq 'main') {
                     Devel::Cover::get_cover($item->[1], $item->[2]);
@@ -451,26 +568,54 @@ sub _build_deparse_cache {
                 1;
             };
             unless ($ok) {
-                warn "  [cache] get_cover failed: $@" if $debug;
+                $stats{failed}++;
+                warn "  [cache] get_cover failed: $@\n" if $debug;
                 next;
             }
 
             my $seen_delta = $seen_tracker->take_delta;
+            my $seen_entries = 0;
+            if ($debug >= 2) {
+                $seen_entries += scalar keys %{$_} for values %$seen_delta;
+            }
 
             # main_cv is not keyed by CV address — skip caching it, but its
             # %Seen and call effects have already accumulated.
-            next if $item->[0] eq 'main';
+            if ($item->[0] eq 'main') {
+                $stats{main}++;
+                if ($debug >= 3) {
+                    warn sprintf(
+                        "  [cache] build: main_cv calls=%d seen_entries=%d elapsed=%.3fs\n",
+                        scalar @calls,
+                        $seen_entries,
+                        _time() - $cv_start,
+                    );
+                }
+                next;
+            }
 
             my $cv = $item->[1];
-            next unless ref($cv) eq "B::CV" && $$cv;
-            next if exists $cache->{$$cv};
+            unless (ref($cv) eq "B::CV" && $$cv) {
+                $stats{invalid_cv}++;
+                next;
+            }
+            if (exists $cache->{$$cv}) {
+                $stats{duplicates}++;
+                next;
+            }
             my $root = $cv->ROOT;
-            next unless ref($root) && !$root->isa("B::NULL");
+            unless (ref($root) && !$root->isa("B::NULL")) {
+                $stats{no_root}++;
+                next;
+            }
 
             # Cache if this CV produced calls OR had a non-empty %Seen delta.
             # CVs with only a seen delta still need replay to preserve
             # duplicate-suppression state for later non-cached CVs.
-            next unless @calls || %$seen_delta;
+            unless (@calls || %$seen_delta) {
+                $stats{empty}++;
+                next;
+            }
 
             $cache->{$$cv} = {
                 start => ${$cv->START},
@@ -478,6 +623,22 @@ sub _build_deparse_cache {
                 calls => [@calls],
                 seen  => $seen_delta,
             };
+            $stats{cached}++;
+            $stats{calls} += scalar @calls;
+            $stats{seen_entries} += $seen_entries;
+            $stats{seen_only}++ if !@calls && %$seen_delta;
+
+            if ($debug >= 3) {
+                warn sprintf(
+                    "  [cache] build: cached CV %d/%d calls=%d seen_entries=%d elapsed=%.3fs\n",
+                    $stats{processed},
+                    $stats{candidates},
+                    scalar @calls,
+                    $seen_entries,
+                    _time() - $cv_start,
+                );
+            }
+
         }
         1;
     };
@@ -501,11 +662,27 @@ sub _build_deparse_cache {
     die "Devel::Cover::Optimizer: unexpected disk write during cache build: $tmp_base\n" if -d $tmp_base;
 
     if ($debug) {
-        my $n = scalar keys %$cache;
-        my $total_calls = 0;
-        $total_calls += scalar @{$_->{calls}} for values %$cache;
-        my $seen_only = grep { !@{$_->{calls}} && %{$_->{seen}} } values %$cache;
-        warn "  [cache] built deparse cache: $n CVs ($seen_only seen-only), $total_calls cached calls\n";
+        warn sprintf(
+            "  [cache] build: cached %d/%d CVs in %.3fs (%d calls, %d seen-only)\n",
+            $stats{cached},
+            $stats{candidates},
+            _time() - $build_start,
+            $stats{calls},
+            $stats{seen_only},
+        );
+    }
+    if ($debug >= 2) {
+        warn sprintf(
+            "  [cache] build detail: processed=%d failed=%d main=%d duplicate=%d invalid=%d no_root=%d empty=%d seen_entries=%d\n",
+            $stats{processed},
+            $stats{failed},
+            $stats{main},
+            $stats{duplicates},
+            $stats{invalid_cv},
+            $stats{no_root},
+            $stats{empty},
+            $stats{seen_entries},
+        );
     }
 
     return $Seen_ref;
@@ -536,6 +713,13 @@ sub _inc_value_looks_like_module_file {
 
     (my $path = $file) =~ s!\\!/!g;
     return $path eq $mod || $path =~ m!(?:^|/)\Q$mod\E\z!;
+}
+
+# Late imports do not affect bare `time` ops compiled earlier, so debug timing
+# calls Time::HiRes directly while keeping the module off the non-debug path.
+sub _time {
+    require Time::HiRes;
+    Time::HiRes::time();
 }
 
 # Used only by debug logging — not on the hot path.
