@@ -194,7 +194,8 @@ sub import {
     #
     # This optimization runs the deparse walk once in the parent
     # (before forking) and records the sequence of add_*_cover calls
-    # each CV produces. In children, we wrap B::Deparse::deparse_sub:
+    # each CV produces. In children, we wrap B::Deparse::deparse_sub
+    # when it is called directly by Devel::Cover::get_cover:
     # for cached CVs, we replay the recorded calls instead of
     # re-walking the op tree. The replayed calls still read $Coverage
     # at call time, so each child gets its own correct counts.
@@ -263,8 +264,13 @@ sub _install_deparse_cache {
     *B::Deparse::deparse_sub = sub {
         my $cv = $_[1];
         if ($$Structure_ref && ref($cv) && $cv->isa("B::CV") && exists $cache{$$cv}) {
+            # caller(1) is the frame that invoked this deparse_sub wrapper.
+            my $caller_sub = (caller(1))[3] // "";
             my $entry = $cache{$$cv};
-            if (${$cv->START} == $entry->{start} && ${$cv->ROOT} == $entry->{root}) {
+            if ($caller_sub eq "Devel::Cover::get_cover"
+                && ${$cv->START} == $entry->{start}
+                && ${$cv->ROOT} == $entry->{root})
+            {
                 $cache_hits++;
                 for my $c (@{$entry->{calls}}) {
                     local $Devel::Cover::File = $c->{file};
