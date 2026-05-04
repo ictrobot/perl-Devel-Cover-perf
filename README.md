@@ -27,6 +27,9 @@ this approach in a real coverage workflow.
 - [`REPORT.md`](REPORT.md) describes the underlying coverage/reporting problem.
 - [`OPTIMIZATIONS.md`](OPTIMIZATIONS.md) describes the implemented
   optimizations, trade-offs, discarded approaches, and detailed benchmark data.
+- [`COVERAGE_CORRECTNESS.md`](COVERAGE_CORRECTNESS.md) documents coverage
+  correctness risks, including Devel::Cover blind spots, forkprove effects, and
+  optimizer-specific failure modes.
 
 ## Current results
 
