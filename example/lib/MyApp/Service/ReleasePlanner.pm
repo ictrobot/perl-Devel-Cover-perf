@@ -3,6 +3,7 @@ use Moo;
 use MyApp::Report::Burndown;
 use MyApp::Report::Calendar;
 use MyApp::Report::ScheduleWindow;
+use MyApp::Model::Workflow;
 
 has burndown => (is => 'lazy');
 has calendar => (is => 'lazy');
@@ -29,6 +30,13 @@ sub calendar_for {
         label => $self->calendar->month_label($year, $month),
         weeks => $self->calendar->month_grid($year, $month),
     };
+}
+
+sub workflow_for {
+    my ($self, $id, @steps) = @_;
+    my $workflow = MyApp::Model::Workflow->new(id => $id);
+    $workflow->add_step($_) for @steps;
+    return $workflow;
 }
 
 1;

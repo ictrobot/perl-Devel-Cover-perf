@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 6;
+use Test::More tests => 9;
 use MyApp::Service::ReleasePlanner;
 
 my $planner = MyApp::Service::ReleasePlanner->new;
@@ -13,3 +13,8 @@ ok(@{$plan->{weeks}} >= 1, 'includes weeks');
 my $calendar = $planner->calendar_for(2026, 5);
 is($calendar->{label}, 'May 2026', 'calendar label');
 is(scalar @{$calendar->{weeks}}, 6, 'calendar grid');
+
+my $workflow = $planner->workflow_for('release-2026.05', qw(draft review ship));
+isa_ok($workflow, 'MyApp::Model::Workflow');
+is($workflow->step_count, 3, 'builds a release workflow');
+is(scalar @{$workflow->transitions}, 0, 'workflow starts without transitions');

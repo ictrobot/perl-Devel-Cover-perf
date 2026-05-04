@@ -157,6 +157,12 @@ selected CVs when this assumption doesn't hold:
   corresponding `%INC` entries
 - Runtime symbol table manipulation installs selected subs into namespaces
   not derivable from `%INC`
+- A loader or package generator leaves a non-file value in `%INC` (for example
+  a reference, a true sentinel such as `1`, or Moose's `(set by Moose)`
+  sentinel). Those packages are descended conservatively, because
+  Devel::Cover's filename normalisation expects a real filename. This also
+  avoids undefined-value warnings in Devel::Cover 1.49 and older; Devel::Cover
+  1.50 added its own guard for false filenames in `use_file`.
 
 For conventional module layouts and broad exclusive selects like
 `+select,^lib,+ignore,^`, this works correctly. Use `no_walksymtable` if you

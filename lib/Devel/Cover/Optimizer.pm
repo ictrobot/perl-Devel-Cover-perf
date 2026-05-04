@@ -105,7 +105,8 @@ sub import {
         my $walk;
         $walk = sub {
             # $symref, $method, $recurse, $prefix match stock walksymtable's signature.
-            # $ancestor_matched is ours: true when an ancestor's own %INC file matched use_file.
+            # $ancestor_matched is ours: true when an ancestor's %INC entry matched
+            # use_file, or had a non-file value we need to descend conservatively.
             my ($symref, $method, $recurse, $prefix, $ancestor_matched) = @_;
             no strict 'refs';
             $prefix = '' unless defined $prefix;
@@ -116,7 +117,7 @@ sub import {
                 %must_descend = ();
                 for my $mod (keys %INC) {
                     next unless $mod =~ /\.pm$/;
-                    next unless Devel::Cover::use_file($INC{$mod});
+                    next unless _inc_requires_descend($mod);
                     (my $pkg_path = $mod) =~ s/\.pm$//;
                     my @parts = split m{/}, $pkg_path;
                     my $pfx = '';
@@ -124,7 +125,7 @@ sub import {
                         $pfx .= "${part}::";
                         (my $pfx_mod = $pfx) =~ s/::$/.pm/;
                         $pfx_mod =~ s!::!/!g;
-                        last if exists $INC{$pfx_mod} && Devel::Cover::use_file($INC{$pfx_mod});
+                        last if _inc_requires_descend($pfx_mod);
                         $must_descend{$pfx} = 1;
                     }
                 }
@@ -149,14 +150,14 @@ sub import {
 
                     (my $mod = $pkg) =~ s/::$/.pm/;
                     $mod =~ s!::!/!g;
-                    my $self_matched = exists $INC{$mod} && Devel::Cover::use_file($INC{$mod});
-                    my $descend = $self_matched || $must_descend{$pkg} || $ancestor_matched;
+                    my $self_requires_descend = _inc_requires_descend($mod);
+                    my $descend = $self_requires_descend || $must_descend{$pkg} || $ancestor_matched;
                     if ($debug) {
                         warn $descend ? "  [walk] descend $pkg\n" : "  [walk] skip subtree $pkg\n";
                     }
                     next unless $descend;
 
-                    $walk->(\%$fullname, $method, $recurse, $pkg, $self_matched || $ancestor_matched);
+                    $walk->(\%$fullname, $method, $recurse, $pkg, $self_requires_descend || $ancestor_matched);
                 } else {
                     my $gv = B::svref_2object(\*$fullname);
                     my $cv = $gv->CV;
@@ -512,6 +513,32 @@ sub _seen_delta {
         }
     }
     return \%delta;
+}
+
+# Return true when a %INC key should make us descend into the corresponding
+# package stash. We only ask Devel::Cover::use_file about values that look like
+# the actual module file for that key. Some loaders and package generators leave
+# refs, undef, true sentinels such as 1, or strings such as "(set by Moose)" in
+# %INC; passing those into Devel::Cover::use_file can drive filename
+# normalisation with bogus values, so we treat them as unknown and descend
+# conservatively.
+sub _inc_requires_descend {
+    my ($mod) = @_;
+    return 0 unless exists $INC{$mod};
+
+    my $file = $INC{$mod};
+    return 1 unless _inc_value_looks_like_module_file($mod, $file);
+
+    Devel::Cover::use_file($file) ? 1 : 0;
+}
+
+# Treat the %INC value as a filename only if the value contains the module key.
+sub _inc_value_looks_like_module_file {
+    my ($mod, $file) = @_;
+    return 0 unless defined $file && !ref($file) && length($file);
+
+    (my $path = $file) =~ s!\\!/!g;
+    return $path eq $mod || $path =~ m!(?:^|/)\Q$mod\E\z!;
 }
 
 # Used only by debug logging — not on the hot path.
