@@ -317,6 +317,11 @@ sub _install_deparse_cache {
                 while (my ($type, $ops) = each %{$entry->{seen}}) {
                     $Seen_ref->{$type}{$_} += $ops->{$_} for keys %$ops;
                 }
+                # Stock get_cover() leaves $File/$Line as state for later CVs.
+                # This is separate from the per-call location used above, since
+                # B::Deparse can localize/restore location during inner walks.
+                ($Devel::Cover::File, $Devel::Cover::Line) =
+                    ($entry->{final_file}, $entry->{final_line});
                 $replay_time += _time() - $replay_start if $debug;
                 return "";
             }
@@ -572,6 +577,8 @@ sub _build_deparse_cache {
                 warn "  [cache] get_cover failed: $@\n" if $debug;
                 next;
             }
+            my ($final_file, $final_line) =
+                ($Devel::Cover::File, $Devel::Cover::Line);
 
             my $seen_delta = $seen_tracker->take_delta;
             my $seen_entries = 0;
@@ -618,10 +625,12 @@ sub _build_deparse_cache {
             }
 
             $cache->{$$cv} = {
-                start => ${$cv->START},
-                root  => $$root,
-                calls => [@calls],
-                seen  => $seen_delta,
+                start      => ${$cv->START},
+                root       => $$root,
+                calls      => [@calls],
+                seen       => $seen_delta,
+                final_file => $final_file,
+                final_line => $final_line,
             };
             $stats{cached}++;
             $stats{calls} += scalar @calls;

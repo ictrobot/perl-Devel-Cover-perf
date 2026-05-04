@@ -257,9 +257,10 @@ function normally since its state has been restored.
 
 ### Replay correctness
 
-Each cache entry stores three things: the recorded `add_*_cover` call
-sequence, `START`/`ROOT` op addresses for validation, and the `%Seen`
-mutations from that CV's deparse walk.
+Each cache entry stores four things: the recorded `add_*_cover` call
+sequence, `START`/`ROOT` op addresses for validation, the `%Seen`
+mutations from that CV's deparse walk, and the final `$File`/`$Line`
+state left by `get_cover()`.
 
 **`$File`/`$Line` globals:** Several `add_*_cover` functions read the
 package globals `$Devel::Cover::File` and `$Devel::Cover::Line` in
@@ -267,7 +268,10 @@ addition to (or instead of) their explicit arguments. For example,
 `add_branch_cover` takes `$file`/`$line` args but uses the global `$File`
 for the branch vec; `add_condition_cover` reads both entirely from globals.
 The cache captures `$File` and `$Line` at each call site during recording
-and restores them (via `local`) before each replayed call.
+and restores them (via `local`) before each replayed call. It also stores the
+final `$File`/`$Line` left after `get_cover()` finishes for the CV and restores
+that final global state after replay, because later locationless CVs can depend
+on Devel::Cover's leaked last location state.
 
 **`%Seen` replay:** `%Seen` suppresses duplicate statement/branch/condition
 discovery across the entire report pass (it persists across CVs). During
