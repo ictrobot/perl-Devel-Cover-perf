@@ -269,10 +269,26 @@ addition to (or instead of) their explicit arguments. For example,
 `add_branch_cover` takes `$file`/`$line` args but uses the global `$File`
 for the branch vec; `add_condition_cover` reads both entirely from globals.
 The cache captures `$File` and `$Line` at each call site during recording
-and restores them (via `local`) before each replayed call. It also stores the
-final `$File`/`$Line` left after `get_cover()` finishes for the CV and restores
-that final global state after replay, because later locationless CVs can depend
-on Devel::Cover's leaked last location state.
+and restores them (via `local`) before each replayed call. The cache only stores
+entries where the initial `get_cover()` call established location state via
+`get_location($start)`. The implementation observes the real stock call rather
+than predicting from `$cv->START`, and only marks the entry location-safe after
+the first `get_location()` call for the CV is the direct
+`Devel::Cover::get_cover` call and it has left a non-empty normalized `$File`.
+That preserves Devel::Cover's eval and `#line` filename handling while tying
+the predicate to call order, not just caller identity.
+This relies on stock `get_cover()` making `get_location($start)` its only direct
+`get_location()` call, and doing so before `deparse_sub()`.
+
+The predicate is deliberately about the initial `get_cover()` location call, not
+any later `get_location()` call during deparse. Later statement locations can be
+inside localized deparse scopes, and branch/condition hooks may already have
+captured inherited stale `$File`/`$Line` before a later statement establishes a
+real location. Locationless CVs can depend on whatever `$File`/`$Line` the child
+report has inherited at that point, so they are left uncached rather than
+replaying the parent's inherited cache-build state. For cached entries, replay
+restores the final `$File`/`$Line` state left by stock `get_cover()`, because
+later locationless CVs can depend on Devel::Cover's leaked last location state.
 
 **`%Seen` replay:** `%Seen` suppresses duplicate statement, branch, condition,
 and "other" discoveries across the entire report pass. It is lexical to

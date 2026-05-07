@@ -69,9 +69,18 @@ next accepted CV is processed. Removing them from the iteration changed which
 stale location a later locationless CV inherited.
 
 The current cache optimization leaves the real `get_cover()` entry path in
-place and only replaces `deparse_sub`, which reduces this risk. It also captures
-and restores `File`/`Line` for each replayed branch/condition/statement call,
-then restores the final `File`/`Line` state left by the cached CV.
+place and only replaces `deparse_sub`, which reduces this risk. It also refuses
+to cache CVs unless the initial `get_cover()` call establishes a non-empty
+location through `get_location($start)`. Locationless CVs are therefore handled
+by stock `get_cover()` in the child, preserving whatever stale-location behavior
+Devel::Cover would normally have had rather than replaying the parent's
+cache-build location state. For cached CVs, it captures and restores
+`File`/`Line` for each replayed branch/condition/statement call, then restores
+the final `File`/`Line` state left by the cached CV.
+
+This mitigates an optimizer-specific amplification of stale-location behavior;
+it does not fix the underlying stock Devel::Cover issue for uncached or
+locationless CVs.
 
 ### 2. Coverage can change program behavior through loaded dependencies
 
@@ -444,6 +453,9 @@ The main correctness dependencies are:
 - the child sees the same op objects and B::Deparse traversal for cached CVs
 - `$Devel::Cover::File` and `$Devel::Cover::Line` are restored for each replayed
   call and to the final state left by the cached CV
+- cached CVs have an initial location established by stock
+  `get_cover() -> get_location($start)`, so replayed branch/condition calls are
+  not based on an inherited parent-side location
 - `%Seen` is updated as if the deparse walker had really traversed the CV
 - speculative cache building does not leave behind `%Run`, `$Structure`,
   `$Sub_count`, `%Seen`, `$Pod`, or `%Pod` side effects
@@ -455,7 +467,9 @@ immediately, invalidates private owners when real deparse reaches their keys
 first, validates `START`/`ROOT`, uses temporary structure/run state during cache
 build, and saves/restores POD state. The remaining risk is inherent in replay:
 if Devel::Cover or B::Deparse would have made a different call stream in the
-child, the replay path can be wrong.
+child, the replay path can be wrong. Locationless CVs are now outside the cache
+hit surface, so this risk is concentrated on CVs whose initial location was
+established normally.
 
 ### 4. Structure write skipping depends on dirty tracking
 

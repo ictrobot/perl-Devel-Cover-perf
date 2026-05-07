@@ -127,9 +127,9 @@ sub _install_deparse_cache {
                     $entry->{replayed} = 1;
 
                     # Stock get_cover() leaves $File/$Line as state for later
-                    # CVs. This is separate from the per-call location above,
-                    # since B::Deparse can localize/restore location during
-                    # inner walks.
+                    # CVs. Cache entries are only built for CVs whose initial
+                    # get_cover() location was established, so this is a real
+                    # CV-local final state rather than inherited parent state.
                     ($Devel::Cover::File, $Devel::Cover::Line) = ($entry->{final_file}, $entry->{final_line});
 
                     $replay_time += _time() - $replay_start if $debug;
@@ -280,6 +280,7 @@ sub _build_deparse_cache {
     my $orig_add_stmt = \&Devel::Cover::add_statement_cover;
     my $orig_add_br   = \&Devel::Cover::add_branch_cover;
     my $orig_add_cond = \&Devel::Cover::add_condition_cover;
+    my $orig_get_location = \&Devel::Cover::get_location;
     my %seen_touches;
     my %stats = (
         candidates   => 0,
@@ -289,6 +290,7 @@ sub _build_deparse_cache {
         empty        => 0,
         failed       => 0,
         invalid_cv   => 0,
+        no_location  => 0,
         main         => 0,
         no_root      => 0,
         processed    => 0,
@@ -298,6 +300,8 @@ sub _build_deparse_cache {
         seen_zero    => 0,
     );
     my $seen_tracker;
+    my $initial_location_set;
+    my $had_get_location_call;
 
     eval {
         no warnings 'redefine';
@@ -332,6 +336,34 @@ sub _build_deparse_cache {
                 line => $Devel::Cover::Line,
             };
             $orig_add_cond->(@_);
+        };
+        local *Devel::Cover::get_location = sub {
+            # Only the first get_location() call, when it is the direct
+            # get_cover() -> get_location($start) call, proves this CV
+            # established its own location before deparse replayable
+            # branch/condition calls. If any earlier get_location() happened,
+            # this is no longer the initial location for the CV.
+            # This relies on stock get_cover() making get_location($start) its
+            # only direct get_location() call, before deparse_sub().
+            my $caller_sub = (caller(1))[3] // "";
+            my $is_initial_get_cover_location =
+                $caller_sub eq "Devel::Cover::get_cover"
+                && !$had_get_location_call
+                && $_[0]
+                && $_[0]->can("file");
+
+            $had_get_location_call = 1;
+
+            my $ret = $orig_get_location->(@_);
+            # Let stock get_location handle eval/#line normalization first; the
+            # resulting non-empty $File is what stock get_cover will use for
+            # use_file() and as the baseline for the deparse walk.
+            $initial_location_set = 1
+                if $is_initial_get_cover_location
+                && defined $Devel::Cover::File
+                && length $Devel::Cover::File;
+
+            return $ret;
         };
 
         no warnings 'once';
@@ -376,6 +408,8 @@ sub _build_deparse_cache {
             }
 
             @calls = ();
+            $initial_location_set = 0;
+            $had_get_location_call = 0;
 
             my $cv_start = $debug >= 3 ? _time() : 0;
             my $ok = eval {
@@ -438,6 +472,13 @@ sub _build_deparse_cache {
                 # No calls and no %Seen effects means replaying this CV cannot
                 # affect later coverage discovery.
                 $stats{empty}++;
+                next;
+            }
+            unless ($initial_location_set) {
+                # Locationless CVs inherit $File/$Line from the current report
+                # state. Replaying the parent's inherited state can misattribute
+                # branch/condition calls or change what later CVs inherit.
+                $stats{no_location}++;
                 next;
             }
 
@@ -515,7 +556,7 @@ sub _build_deparse_cache {
     }
     if ($debug >= 2) {
         warn sprintf(
-            "  [cache] build detail: processed=%d failed=%d main=%d duplicate=%d invalid=%d no_root=%d empty=%d seen_zero=%d seen_nonzero=%d seen_sets=%d private_zero=%d shared_zero=%d private_sets=%d shared_sets=%d\n",
+            "  [cache] build detail: processed=%d failed=%d main=%d duplicate=%d invalid=%d no_root=%d empty=%d no_location=%d seen_zero=%d seen_nonzero=%d seen_sets=%d private_zero=%d shared_zero=%d private_sets=%d shared_sets=%d\n",
             $stats{processed},
             $stats{failed},
             $stats{main},
@@ -523,6 +564,7 @@ sub _build_deparse_cache {
             $stats{invalid_cv},
             $stats{no_root},
             $stats{empty},
+            $stats{no_location},
             $stats{seen_zero},
             $stats{seen_nonzero},
             $stats{seen_sets},
