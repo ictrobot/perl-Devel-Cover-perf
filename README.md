@@ -18,8 +18,9 @@ this approach in a real coverage workflow.
 
 ## What is here
 
-- [`lib/Devel/Cover/Optimizer.pm`](lib/Devel/Cover/Optimizer.pm) contains the
-  experimental optimizations.
+- [`lib/Devel/Cover/Optimizer.pm`](lib/Devel/Cover/Optimizer.pm) is the public
+  loader; the individual experimental optimizations live under
+  `lib/Devel/Cover/Optimizer/`.
 - [`example/`](example/) is a synthetic application used for benchmarking and
   compatibility checks.
 - [`ci/harness`](ci/harness) builds the compatibility containers, runs the

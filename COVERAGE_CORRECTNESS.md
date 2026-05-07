@@ -320,7 +320,7 @@ This is the main coverage-risk tradeoff in optimization 1. It is avoidable only
 by being conservative enough to lose some speed, or by falling back to stock
 `walksymtable` for unusual layouts.
 
-### 2. Cache replay can emit add calls that current `%Seen` would suppress
+### 2. Cache replay depends on matching current `%Seen` state
 
 **Impact score:** 4/5.
 
@@ -334,23 +334,30 @@ during cache building, that CV can reach an op also seen by a later cached CV,
 or tests create END blocks, anonymous closures, or generated methods after the
 forkprove parent cache has been built.
 
-**Expected difference:** duplicate statement/branch/condition structure relative
-to a fully uncached report. This can change percentages if the duplicated or
-shifted structure is uncovered.
+**Expected difference:** if not detected, duplicate statement/branch/condition
+structure relative to a fully uncached report. This can change percentages if
+the duplicated or shifted structure is uncovered.
 
 The cache build walks CVs in stock `_report()` order and records both the
-`add_*_cover` calls and the `%Seen` increments for each cached CV. That is
-correct when the child replays the same CVs in the same relative order.
+`add_*_cover` calls and the `%Seen` assumptions for each cached CV. That is
+correct when the child replays the same CVs in the same relative order, and it
+is still safe when mismatched `%Seen` state is detected and treated as a cache
+miss.
 
 The awkward case is a mixed run. Suppose cache build records an add call for
 cached CV `A` because `%Seen` had not seen that op yet. In the child, an earlier
 uncached CV `B` might be present and might reach the same op first. Stock
 Devel::Cover would mark `%Seen` in `B` and suppress the later add call in `A`.
-The current replay path emits `A`'s recorded add calls unconditionally, then
-replays `A`'s `%Seen` increment afterwards. That can duplicate structure.
 
-A conservative mitigation would be to treat the cache entry as a miss if any of
-its recorded `%Seen` keys are already present before replay.
+The current replay path records keys read as false, keys read as true, and keys
+changed from false to true during cache building. Shared assumptions are checked
+against the child `%Seen` state before replay, and required-true assumptions are
+always checked. Private false-to-true writes are applied immediately on cache
+hit; if an uncached walk writes a private required-false key first, the future
+owning cache entry is invalidated and misses. This mitigates the
+straightforward duplicate-add failure mode; the remaining risk is an untracked
+future Devel::Cover `%Seen` access pattern or a cached call stream that no
+longer matches what `B::Deparse` would produce in the child.
 
 ### 3. Cache replay depends on the child matching the parent deparse stream
 
@@ -388,10 +395,12 @@ The main correctness dependencies are:
   `$Sub_count`, `%Seen`, `$Pod`, or `%Pod` side effects
 
 The current implementation addresses those points: it captures per-call and
-final `File`/`Line` state, stores numeric `%Seen` deltas, validates
-`START`/`ROOT`, uses temporary structure/run state during cache build, and
-saves/restores POD state. The remaining risk is inherent in replay: if
-Devel::Cover or B::Deparse would have made a different call stream in the
+final `File`/`Line` state, records `%Seen` true/false assumptions, checks shared
+state and all required-true state before replay, writes private `%Seen` effects
+immediately, invalidates private owners when real deparse reaches their keys
+first, validates `START`/`ROOT`, uses temporary structure/run state during cache
+build, and saves/restores POD state. The remaining risk is inherent in replay:
+if Devel::Cover or B::Deparse would have made a different call stream in the
 child, the replay path can be wrong.
 
 ## Overall Assessment

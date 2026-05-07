@@ -259,8 +259,8 @@ function normally since its state has been restored.
 
 Each cache entry stores four things: the recorded `add_*_cover` call
 sequence, `START`/`ROOT` op addresses for validation, the `%Seen`
-mutations from that CV's deparse walk, and the final `$File`/`$Line`
-state left by `get_cover()`.
+assumptions and mutations from that CV's deparse walk, and the final
+`$File`/`$Line` state left by `get_cover()`.
 
 **`$File`/`$Line` globals:** Several `add_*_cover` functions read the
 package globals `$Devel::Cover::File` and `$Devel::Cover::Line` in
@@ -273,19 +273,85 @@ final `$File`/`$Line` left after `get_cover()` finishes for the CV and restores
 that final global state after replay, because later locationless CVs can depend
 on Devel::Cover's leaked last location state.
 
-**`%Seen` replay:** `%Seen` suppresses duplicate statement/branch/condition
-discovery across the entire report pass (it persists across CVs). During
-replay, cached CVs bypass the deparse walker, so `%Seen` would not be
-populated for their ops. If a later non-cached CV's deparse walk encounters
-ops that should have been suppressed, it could produce extra coverage
-entries. To prevent this, the cache builder walks CVs in stock `_report`
-order with `%Seen` accumulating persistently (cleared once at the start,
-not per-CV). After each CV, only the *delta* — new entries added by that
-CV — is computed and stored. During replay, these deltas are merged back
-into `%Seen`. This matches stock accumulation order and avoids the overhead
-of per-CV deep copies. CVs that produce no `add_*_cover` calls but do
-contribute `%Seen` entries are still cached (with an empty call list) so
-their duplicate-suppression state is replayed.
+**`%Seen` replay:** `%Seen` suppresses duplicate statement, branch, condition,
+and "other" discoveries across the entire report pass. It is lexical to
+Devel::Cover's deparse closure, and it persists across CVs rather than being
+reset per CV. During replay, cached CVs bypass the deparse walker, so `%Seen`
+would not be populated for their ops unless the cache replays those effects too.
+If a later uncached CV's deparse walk encounters ops that stock Devel::Cover
+would have suppressed, it can otherwise produce extra coverage entries.
+
+The cache builder walks CVs in stock `_report` order with `%Seen` accumulating
+persistently: main, BEGIN, CHECK, END/INIT, then `@Cvs`. During each
+`get_cover()` pass, it ties the known inner `%Seen` buckets (`statement`,
+`other`, `branch`, `condition`) and records three sets:
+
+```perl
+seen_requires_zero    # keys read as false
+seen_requires_nonzero # keys read as true, excluding true values set by this CV
+seen_sets_true        # keys changed from false to true
+```
+
+The inner key is the op address Devel::Cover uses (`$$op`). This bucket/key
+model was checked against Devel::Cover 1.33 through 1.52: `%Seen` is lexical,
+the bucket names are stable, report order is stable, relevant accesses use
+`$Seen{...}{$$op}`, and Devel::Cover uses the values as truth state rather than
+meaningful numeric counters. Devel::Cover 1.49-1.52 add another `condition`
+write path for newer xor handling, but the implementation tracks the hash
+itself rather than assuming a particular B::Deparse hook.
+
+After the build pass, keys touched by exactly one report occurrence are treated
+as private to that occurrence; keys touched by more than one occurrence are
+shared. During replay:
+
+1. `START` and `ROOT` op addresses validate that the CV has not been replaced.
+2. Entries already replayed, or invalidated by an uncached walk, miss.
+3. Shared `seen_requires_zero` keys are checked; any true value means miss.
+4. All `seen_requires_nonzero` keys are checked; any false value means miss.
+5. Recorded `add_*_cover` calls are replayed.
+6. Shared and private `seen_sets_true` keys are written directly to backing
+   `%Seen` hashrefs.
+7. The final `$Devel::Cover::File` and `$Devel::Cover::Line` state is restored.
+
+Private required-zero keys are not scanned on every hit. If no uncached deparse
+walk writes one before its owner replays, no other cached entry can observe it
+first. If an uncached miss writes one first, the miss temporarily ties the known
+inner `%Seen` buckets, records false-to-true writes, and invalidates only the
+future cached entry that privately owned that key. This keeps cache-hit replay
+on plain hashrefs instead of paying tied-hash dispatch for every cached write.
+
+`seen_sets_true` alone is not enough. A read-as-zero can affect whether a later
+add call is produced, even if the CV eventually writes a different key; some
+Devel::Cover paths check `statement` and `other` together. A read-as-nonzero
+matters too: if the parent skipped an add call because a key was already true,
+replaying that skip is wrong when the child key is false. A false-to-true write
+usually implies a zero requirement for the same key, so both are recorded and
+then reduced by the private/shared split.
+
+CVs that produce no `add_*_cover` calls but do change `%Seen` from false to true
+are still cached with an empty call list, because their duplicate-suppression
+state can affect later uncached walks. CVs with no calls and no `%Seen` effects
+are omitted.
+
+In the example workload the split is heavily skewed toward private keys. A
+debug run showed about 9.5k private required-zero keys versus 6 shared
+required-zero keys, and about 4.8k private writes versus 4 shared writes. The
+expected cost is a slower parent cache build and a small cache-hit validation
+overhead; this is acceptable because forkprove builds the cache once but pays
+child replay cost many times.
+
+Rejected `%Seen` variants:
+
+- Full preflight: check every recorded `seen_requires_zero`,
+  `seen_requires_nonzero`, and `seen_sets_true` key before each hit. This was
+  straightforward but repeated too much work on the child hot path.
+- Child-tied validation state: keep `%Seen` tied throughout the child and
+  update per-entry validity as keys become true. This made hit validation
+  cheaper in theory, but pushed tied-hash overhead and watcher fanout into the
+  child path and reduced cache hit rate in the initial experiment.
+- Same-order dirty fast path: skip validation while the child is replaying the
+  same clean prefix as the parent. This is attractive, but easy to get subtly
+  wrong once uncached misses appear between cached entries.
 
 ### CI coverage comparison
 
