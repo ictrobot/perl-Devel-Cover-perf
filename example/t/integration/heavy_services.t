@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 26;
+use Test::More tests => 29;
 use MyApp;
 use MyApp::Container;
 use MyApp::Model::Project;
@@ -13,19 +13,24 @@ isa_ok($app->xml_report, 'MyApp::Service::XmlReport');
 isa_ok($app->dashboard, 'MyApp::Service::Dashboard');
 isa_ok($app->digest_builder, 'MyApp::Service::DigestBuilder');
 isa_ok($app->release_planner, 'MyApp::Service::ReleasePlanner');
+isa_ok($app->rule_compiler, 'MyApp::Service::RuleCompiler');
 isa_ok($app->xml_exchange, 'MyApp::Service::XmlExchange');
 isa_ok($app->orm_catalog, 'MyApp::Service::OrmCatalog');
 isa_ok($app->schema_tooling, 'MyApp::Service::SchemaTooling');
 
 my $project = MyApp::Model::Project->new(name => 'Integrated Project', status => 'open');
 my @tasks = (
-    MyApp::Model::Task->new(title => 'Render summary', status => 'open', due_date => '2026-05-04'),
+    MyApp::Model::Task->new(title => 'Render summary', status => 'open', priority => 'high', due_date => '2026-05-04'),
 );
 
 like($app->render_project_summary($project, \@tasks), qr/Integrated Project/, 'app renders project summary');
 like($app->project_xml_report($project, \@tasks), qr/<project_report/, 'app emits xml report');
 like($app->due_status('2099-01-01'), qr/^(due_soon|scheduled)$/, 'app delegates due status');
 like($app->build_digest($project, \@tasks), qr/Integrated Project/, 'app builds digest');
+SKIP: {
+    skip 'skipping generated-structure race fixture', 1 if $ENV{DCO_SKIP_RACY_STRUCTURE_FIXTURE};
+    ok($app->task_matches_rule('high_priority', $tasks[0]), 'app evaluates compiled rule');
+}
 is($app->build_dashboard($project, \@tasks)->{snapshot}{total_tasks}, 1, 'app builds dashboard snapshot');
 is($app->schema_summary->{schema}, 'MyApp::Schema', 'app exposes schema summary');
 is(scalar @{$app->schema_summary->{sources}}, 3, 'schema summary includes sources');
@@ -38,6 +43,7 @@ ok($container->registry->has_service('timeline'), 'container registers timeline'
 ok($container->registry->has_service('xml_report'), 'container registers xml report');
 ok($container->registry->has_service('dashboard'), 'container registers dashboard');
 ok($container->registry->has_service('xml_exchange'), 'container registers xml exchange');
+ok($container->registry->has_service('rule_compiler'), 'container registers rule compiler');
 ok($container->registry->has_service('orm_catalog'), 'container registers orm catalog');
 ok($container->registry->has_service('schema_tooling'), 'container registers schema tooling');
-is($container->registry->count, 12, 'container has original, reporting, ORM, and optional tooling services');
+is($container->registry->count, 13, 'container has original, reporting, rules, ORM, and optional tooling services');

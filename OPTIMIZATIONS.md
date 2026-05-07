@@ -45,8 +45,9 @@ default optimizer mode:
 ### Options
 
 - `no_walksymtable` — disable optimization 1 (walksymtable replacement)
+- `no_structure_cache` — disable optimization 3 (lazy structure DB handling)
 - `cache` — enable optimization 2 (deparse cache, requires PadWalker)
-- `debug` — log all filtering decisions to STDERR
+- `debug`, `debug2`, `debug3` — log optimizer diagnostics to STDERR
 
 ## Benchmark Results (132 libs, 116 tests)
 
@@ -61,7 +62,7 @@ statement, branch, condition, and subroutine.
 | `prove`      | 8.33s |
 | `forkprove`  | 5.57s |
 
-### Default mode (optimization 1)
+### Default mode
 
 | Configuration              | `prove`    | `forkprove` |
 |----------------------------|------------|-------------|
@@ -70,7 +71,7 @@ statement, branch, condition, and subroutine.
 
 **-18%** with `prove` and **-26%** with `forkprove` vs stock.
 
-### With `cache` (optimizations 1+2, requires PadWalker)
+### With `cache` (requires PadWalker)
 
 | Configuration              | `prove`    | `forkprove` |
 |----------------------------|------------|-------------|
@@ -412,6 +413,66 @@ and replays recorded call sequences rather than re-discovering them from
 the op tree. These assumptions are validated (op addresses are checked,
 `%Coverage` is guarded, state is saved/restored), but they couple more
 tightly to Devel::Cover's internals than optimization 1.
+
+## Optimization 3: Lazy structure DB reads and clean write skips
+
+**Target:** `Devel::Cover::DB::Structure->read_all` and `->write`
+
+Devel::Cover stores source structure in `cover_db/structure`, keyed by source
+file digest. Stock `read_all()` eagerly deserializes every known structure file
+into every reporting process. Later, `write()` serializes every structure entry
+that was loaded into memory, even if the process only reused existing structure
+and the digest file already exists on disk.
+
+This is particularly wasteful under forkprove: each child starts with the same
+source tree and usually needs only a small subset of the existing structure
+database, then many children rewrite identical digest files.
+
+The optimizer replaces `read_all()` with a lazy marker. Before operations that
+need existing structure for a source file, it computes that source file's digest
+and reads only `cover_db/structure/$digest` if it exists:
+
+- `set_file`
+- `set_subroutine`
+- `store_counts`
+- generated `get_*` structure lookups by digest
+- generated `add_*` structure mutations
+
+`set_file` is implemented directly rather than wrapping the stock method,
+because the stock method also computes the digest. The lazy path needs the
+digest to decide whether to read existing structure, so calling the stock method
+afterward would read the source file twice.
+
+Write skipping is intentionally conservative. It cannot simply skip every digest
+file that already exists, because a process can discover extra structure for an
+existing source digest, such as conditional `eval`, generated methods, or
+additional subroutine instances for the same file. In that case the digest file
+exists but the in-memory structure has genuinely changed.
+
+The current implementation tracks dirty source files instead:
+
+- generated `add_*` methods mark the file dirty, because they append structure;
+- `set_subroutine` marks dirty only when it is creating a new structure entry,
+  not when it reuses an existing `(file, line, sub_name, count)` entry;
+- `store_counts` marks dirty only when the `__COVER__` start entry is missing
+  or its active per-criterion count indexes change;
+- `delete_file` keeps stock deletion semantics for the in-memory structure.
+
+During `write()`, an existing digest file is skipped only when the source file
+is clean. Dirty files, missing digest files, and files without a usable digest
+fall back to stock-style behavior.
+
+The implementation also tracks loaded digests as well as source filenames,
+avoiding repeated reads when the same digest is reached through different
+paths. Generated `get_*` methods are patched too, so lazy `read_all()` also
+works for report-time structure lookup by digest if the optimizer is loaded
+there.
+
+Focused local A/B benchmarks against the committed `no_structure_cache` escape
+hatch showed plain `prove` improving by about 7%, forkprove without the deparse
+cache staying effectively neutral, and the intended forkprove + deparse-cache
+path improving by about 7%. In that last case, system time dropped from
+`4.427s` to `3.521s` in this example.
 
 ## Discarded approaches
 

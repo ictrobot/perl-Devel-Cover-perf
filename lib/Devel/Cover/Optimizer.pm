@@ -12,6 +12,7 @@ use warnings;
 #
 # Options:
 #   no_walksymtable        - disable optimization 1 (walksymtable replacement)
+#   no_structure_cache     - disable optimization 3 (lazy structure DB handling)
 #   cache                  - pre-cache deparse walks for preloaded CVs
 #   debug                  - log summary diagnostics to STDERR
 #   debug2                 - log cache/walk phases and aggregate detail
@@ -49,11 +50,17 @@ sub import {
     }
 
     my $no_walksymtable = delete $opts{no_walksymtable};
+    my $no_structure_cache = delete $opts{no_structure_cache};
     my $cache_mode      = delete $opts{cache};
 
     unless ($no_walksymtable) {
         require Devel::Cover::Optimizer::Walksymtable;
         Devel::Cover::Optimizer::Walksymtable::install(debug => $debug);
+    }
+
+    unless ($no_structure_cache) {
+        require Devel::Cover::Optimizer::StructureCache;
+        Devel::Cover::Optimizer::StructureCache::install(debug => $debug);
     }
 
     if ($cache_mode) {

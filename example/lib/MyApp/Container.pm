@@ -10,6 +10,7 @@ use MyApp::Service::XmlReport;
 use MyApp::Service::Dashboard;
 use MyApp::Service::DigestBuilder;
 use MyApp::Service::ReleasePlanner;
+use MyApp::Service::RuleCompiler;
 use MyApp::Service::XmlExchange;
 use MyApp::Service::OrmCatalog;
 use MyApp::Service::SchemaTooling;
@@ -24,6 +25,7 @@ has xml_report        => (is => 'lazy');
 has dashboard         => (is => 'lazy');
 has digest_builder    => (is => 'lazy');
 has release_planner   => (is => 'lazy');
+has rule_compiler     => (is => 'lazy');
 has xml_exchange      => (is => 'lazy');
 has orm_catalog       => (is => 'lazy');
 has schema_tooling    => (is => 'lazy');
@@ -38,6 +40,7 @@ sub _build_xml_report        { MyApp::Service::XmlReport->new }
 sub _build_dashboard         { MyApp::Service::Dashboard->new }
 sub _build_digest_builder    { MyApp::Service::DigestBuilder->new }
 sub _build_release_planner   { MyApp::Service::ReleasePlanner->new }
+sub _build_rule_compiler     { MyApp::Service::RuleCompiler->new }
 sub _build_xml_exchange      { MyApp::Service::XmlExchange->new }
 sub _build_orm_catalog       { MyApp::Service::OrmCatalog->new }
 sub _build_schema_tooling    { MyApp::Service::SchemaTooling->new }
@@ -54,6 +57,7 @@ sub bootstrap {
     $self->registry->register(dashboard         => $self->dashboard);
     $self->registry->register(digest_builder    => $self->digest_builder);
     $self->registry->register(release_planner   => $self->release_planner);
+    $self->registry->register(rule_compiler     => $self->rule_compiler);
     $self->registry->register(xml_exchange      => $self->xml_exchange);
     $self->registry->register(orm_catalog       => $self->orm_catalog);
     $self->registry->register(schema_tooling    => $self->schema_tooling);

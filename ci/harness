@@ -15,6 +15,7 @@ mode="all"
 example="example"
 build_only=0
 jobs=1
+skip_racy_structure_fixture=0
 coverage=""
 coverage_set=0
 output_dir=""
@@ -38,6 +39,8 @@ Options:
   --example DIR        Example dir relative to repo root (default: example)
   --build-only         Build Docker images only, don't run tests
   --jobs N             Parallel test jobs passed to prove/forkprove -jN (default: 1)
+  --skip-racy-structure-fixture
+                       Set DCO_SKIP_RACY_STRUCTURE_FIXTURE=1 inside test runs
   --output DIR         Output directory (default: ci/output/<timestamp>)
   -v, --verbose        Verbose output
   -h, --help           Show this help
@@ -65,12 +68,32 @@ while [[ $# -gt 0 ]]; do
         --example)    example="$2"; shift 2 ;;
         --build-only) build_only=1; shift ;;
         --jobs|-j)    jobs="$2"; shift 2 ;;
+        --skip-racy-structure-fixture) skip_racy_structure_fixture=1; shift ;;
         --output)     output_dir="$2"; shift 2 ;;
         -v|--verbose) verbose=1; shift ;;
         -h|--help)    usage ;;
         *)            echo "Unknown option: $1" >&2; usage ;;
     esac
 done
+
+export DCO_SKIP_RACY_STRUCTURE_FIXTURE="$skip_racy_structure_fixture"
+
+if (( jobs > 1 && skip_racy_structure_fixture )); then
+    cat >&2 <<EOF
+NOTE: --jobs > 1 is running with DCO_SKIP_RACY_STRUCTURE_FIXTURE=1.
+This skips the generated-structure race fixture for a faster parallel smoke check.
+Use --jobs 1 without this option for authoritative coverage equivalence checks.
+
+EOF
+elif (( jobs > 1 )); then
+    cat >&2 <<EOF
+WARNING: --jobs > 1 runs tests in parallel inside each mode.
+Coverage comparison can fail due to stock Devel::Cover structure last-writer-wins behavior
+when tests generate different structure for the same source digest concurrently.
+Use --jobs 1 for authoritative coverage equivalence checks.
+
+EOF
+fi
 
 # Resolve DC versions
 dc_versions_file="$SCRIPT_DIR/dc-versions.txt"
@@ -192,6 +215,9 @@ else
     log "Coverage criteria: runner default"
 fi
 log "Summary criteria: $summary_coverage"
+if (( skip_racy_structure_fixture )); then
+    log "Skipping racy structure fixture: DCO_SKIP_RACY_STRUCTURE_FIXTURE=1"
+fi
 
 print_failure_detail() {
     local mode_dir="$1" status="$2"

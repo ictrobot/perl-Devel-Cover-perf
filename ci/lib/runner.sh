@@ -44,6 +44,7 @@ run_mode() {
     local image="$1" mode="$2" example_dir="$3" output_dir="$4" repo_root="$5"
     local jobs="${6:-1}"
     local coverage="${7:-$DC_REPORT_COVERAGE}"
+    local skip_racy_structure_fixture="${DCO_SKIP_RACY_STRUCTURE_FIXTURE:-0}"
     local summary_coverage
     summary_coverage=$(summary_coverage_for "$coverage")
     if [[ -z "$summary_coverage" ]]; then
@@ -113,7 +114,8 @@ cover -delete -silent 2>/dev/null || true
 
 set +e
 /usr/bin/time -f 'elapsed=%e user=%U sys=%S' -o /opt/output/time.txt \
-    env PERL5OPT='${perl5opt}' ${runner_cmd} > /opt/output/test-output.txt 2>&1
+    env DCO_SKIP_RACY_STRUCTURE_FIXTURE='${skip_racy_structure_fixture}' \
+        PERL5OPT='${perl5opt}' ${runner_cmd} > /opt/output/test-output.txt 2>&1
 echo \$? > /opt/output/exit-code.txt
 set -e
 

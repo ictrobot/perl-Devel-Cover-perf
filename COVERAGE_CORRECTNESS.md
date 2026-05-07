@@ -185,7 +185,60 @@ Some source shapes do not round-trip cleanly through that model. This is not
 optimizer-specific. The cache optimization is safe only inside one parent/child
 fork family where the op tree and B::Deparse implementation are the same.
 
-### 6. Anonymous sub attribution is approximate
+### 6. Shared structure files are last-writer-wins
+
+**Impact score:** 3/5.
+
+**Versions:** 1.38 and 1.52.
+
+**Chance:** Low in serial test runs; medium when tests run in parallel and
+different processes generate different structure for the same source file.
+
+**More likely when:** two processes load the same digestable source file, then
+compile different conditional `eval` blocks, generated methods, or optional
+plugin code attributed back to that source file.
+
+**Expected difference:** the final report can interpret one process's run
+counts through another process's structure. This can merge generated subs,
+drop structure for a generated sub, or attach branch/condition counts to the
+wrong generated entry. The effect is usually local to generated code in one
+file, but can change that file's percentages.
+
+Devel::Cover writes per-process run counts under unique `cover_db/runs/...`
+paths, but source structure is shared by digest under `cover_db/structure`.
+Structure writes are atomic at the file level: the process writes a temporary
+file and renames it into place. That prevents torn structure files, but it does
+not merge two divergent structure variants for the same source digest.
+
+If process A and process B both read the same clean structure, A adds generated
+method `foo`, B adds generated method `bar`, and both write the same digest
+file, the last rename wins. The final structure may contain `foo` but not
+`bar`, or `bar` but not `foo`. Later report merging then combines all run
+counts using whichever structure file survived.
+
+The practical problem is that run files contain arrays of counts by criterion
+index, while the structure file says what each index means. For example, a run
+may say "condition index 2 was true three times"; the shared structure says
+whether condition index 2 is `$item->{priority} // ""`, `$item->{status} //
+""`, or something else. If the surviving structure file came from a process
+with a different generated-code shape, the report can still merge the numeric
+counts, but it may describe them using the wrong source text or generated
+subroutine name.
+
+There are two common outcomes:
+
+- If two generated methods reused the same structure indexes, their counts can
+  be merged and reported as one surviving method or condition. Coverage may
+  look better than it should, because one generated path can cover another's
+  reported structure.
+- If one process allocated additional indexes that the surviving structure does
+  not contain, those counts cannot be matched to source structure. The report
+  can drop them or warn that it cannot locate structure for that criterion,
+  making coverage look worse or incomplete.
+
+This is stock Devel::Cover behavior, independent of this optimizer.
+
+### 7. Anonymous sub attribution is approximate
 
 **Impact score:** 3/5.
 
@@ -281,9 +334,10 @@ source filename. The option spelling differs around this area: 1.38 parses
 
 ## Optimizer Issues
 
-These are risks introduced by the experimental optimizer. Package pruning can
-apply in either normal `prove` mode or forkprove mode. Cache replay risks apply
-when cache mode is enabled. They are ranked by correctness impact.
+These are risks introduced by the experimental optimizer. Package pruning and
+structure caching can apply in either normal `prove` mode or forkprove mode.
+Cache replay risks apply when cache mode is enabled. They are ranked by
+correctness impact.
 
 ### 1. Package pruning can miss selected CVs when `%INC` does not predict packages
 
@@ -403,6 +457,58 @@ build, and saves/restores POD state. The remaining risk is inherent in replay:
 if Devel::Cover or B::Deparse would have made a different call stream in the
 child, the replay path can be wrong.
 
+### 4. Structure write skipping depends on dirty tracking
+
+**Impact score:** 4/5.
+
+**Versions:** risk exists against both 1.38 and 1.52; this is optimizer-specific.
+
+**Chance:** Low for the checked Devel::Cover 1.38 and 1.52 code paths.
+
+**More likely when:** a future Devel::Cover version mutates `DB::Structure`
+through methods the optimizer does not wrap, a new criterion uses a different
+structure-update path, or the same source file is reached through multiple
+textual paths in a way that separates the dirty filename from the filename later
+written.
+
+**Expected difference:** only if a real structure mutation is missed. In that
+case, `write()` can treat an existing digest file as clean and skip an update it
+should have written. Later report merging can then miss statement, branch,
+condition, subroutine, or POD structure for affected files, producing warnings
+such as "can't locate structure" or changing percentages for those files.
+
+Stock `DB::Structure->read_all()` eagerly loads every structure file, and
+`write()` rewrites all loaded entries. The structure-cache optimization changes
+that write policy: if a digest file already exists and the current process has
+not changed the corresponding source structure, it skips rewriting the same
+structure. The correctness boundary is therefore the dirty flag, not whether the
+codebase uses generated methods, conditional `eval`, or other dynamic loading.
+
+Those dynamic cases are expected to work when they go through Devel::Cover's
+normal structure APIs. If they add structure through generated `add_*`,
+`set_subroutine`, or `store_counts`, the optimizer marks the source file dirty
+and writes the digest normally. Dirty files, missing digest files, and files
+without a usable digest all fall back to stock-style writes.
+
+The residual risk is an optimizer bug or Devel::Cover internal change: a
+structure mutation happens, but no wrapped path marks the file dirty. That
+would be coverage-silent stale structure, because counts for the new structure
+could be written while the old digest file remains on disk. This is not expected
+for the checked 1.38 and 1.52 paths, but it is a real risk because
+`DB::Structure` does not provide an explicit dirty flag.
+
+This optimization does not attempt to fix Devel::Cover's stock last-writer-wins
+structure semantics. If two processes concurrently write different dirty
+structure variants for the same digest, the final structure file is still
+whichever complete file was renamed last.
+
+There is a separate operational boundary around lazy reads: code that genuinely
+expects `read_all()` to populate all of `$Structure->{f}` for enumeration will
+see different behavior while the optimizer is loaded. The intended use is the
+test process coverage write path, where Devel::Cover normally looks up
+structure by digest or by the current source file. Use `no_structure_cache` if a
+workflow needs stock eager structure loading.
+
 ## Overall Assessment
 
 The highest-impact stock Devel::Cover issue is stale location state: if a CV or
@@ -421,6 +527,12 @@ subroutine coverage, and POD coverage in the child. The replay replaces only
 the expensive B::Deparse discovery of statement/branch/condition call streams.
 The critical things to preserve are `%Seen` and `File`/`Line` state, because
 those are stock Devel::Cover side effects rather than explicit return values.
+
+The structure DB cache is less invasive than deparse replay, but it introduces
+a different kind of risk: stale on-disk structure if dirty tracking ever misses
+a mutation. The current wrappers cover the checked 1.38 and 1.52 mutation
+paths, and `no_structure_cache` provides a direct fallback to stock eager
+structure handling.
 
 The largest expected differences between `prove` and `forkprove` are not caused
 by either optimization. They come from forked counter inheritance and, when POD
