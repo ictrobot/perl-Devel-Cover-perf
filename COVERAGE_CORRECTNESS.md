@@ -437,8 +437,9 @@ cache build, or a cached CV is stale but not detected by the START/ROOT address
 checks.
 
 **Expected difference:** statement, branch, or condition structure for affected
-CVs can change. Subroutine and POD coverage are less exposed because the real
-`get_cover()` path still performs those steps before `deparse_sub` is replayed.
+CVs can change. Subroutine and POD coverage are less exposed for normal deparse
+cache entries because the real `get_cover()` path still performs those steps
+before `deparse_sub` is replayed.
 
 The cache records the sequence of `add_statement_cover`,
 `add_branch_cover`, and `add_condition_cover` calls produced by
@@ -447,6 +448,20 @@ The cache records the sequence of `add_statement_cover`,
 `Devel::Cover::get_cover`. For a cache hit it validates the CV's `START` and
 `ROOT` op addresses, then replays those recorded calls against the child's real
 runtime `$Coverage`.
+
+The cache also wraps `Devel::Cover::get_cover` for a narrower case: CVs where
+the parent observed stock `get_cover()` establish an initial location and then
+return from its own `use_file()` check before subroutine, POD, deparse, or
+`%Seen` effects. Those entries replay only the leaked `$Sub_name`, `$File`, and
+`$Line` state after the same `START`/`ROOT` validation. They intentionally do
+not recreate the empty `$Run{vec}` entries that `get_location()` would have made
+for the ignored file, because those entries carry no counts or structure and
+are deleted as ignored files before the run is written. They are sensitive to
+selection state in the child matching the parent, but the intended optimizer
+configuration keeps select/ignore options static across forked children.
+Ignored-file entries are only cached when the false `use_file()` result comes
+from the configured ignore/inc checks after applying select precedence. Fallback
+rejections and other internal special cases are left uncached.
 
 The main correctness dependencies are:
 
@@ -536,11 +551,14 @@ handling of non-file `%INC` values is the right tradeoff because it chooses
 extra work over missing coverage.
 
 Cache replay is the more invasive optimization, but its coverage surface is
-narrower than it first appears: `get_cover()` still performs file selection,
-subroutine coverage, and POD coverage in the child. The replay replaces only
-the expensive B::Deparse discovery of statement/branch/condition call streams.
-The critical things to preserve are `%Seen` and `File`/`Line` state, because
-those are stock Devel::Cover side effects rather than explicit return values.
+narrower than it first appears. For normal deparse entries, `get_cover()` still
+performs file selection, subroutine coverage, and POD coverage in the child;
+the replay replaces only the expensive B::Deparse discovery of
+statement/branch/condition call streams. For filtered entries, the optimizer
+only replays parent-observed ignored-file returns that happened before
+subroutine, POD, deparse, or `%Seen` effects. The critical things to preserve
+are `%Seen` and `File`/`Line` state, because those are stock Devel::Cover side
+effects rather than explicit return values.
 
 The structure DB cache is less invasive than deparse replay, but it introduces
 a different kind of risk: stale on-disk structure if dirty tracking ever misses

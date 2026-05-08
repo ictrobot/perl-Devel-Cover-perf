@@ -62,12 +62,19 @@ sub _install_deparse_cache {
     }
 
     my %cache;
+    my %filtered_cache;
     my $build_start = $debug ? _time() : 0;
-    my ($Seen_ref, $private_seen_owner) = _build_deparse_cache(\%cache, $Cvs_ref, $Subs_only_ref, $debug);
+    my ($Seen_ref, $private_seen_owner) = _build_deparse_cache(
+        \%cache,
+        \%filtered_cache,
+        $Cvs_ref,
+        $Subs_only_ref,
+        $debug,
+    );
     my $build_elapsed = $debug ? _time() - $build_start : 0;
 
-    warn "  [cache] install: no cache entries built\n" if $debug && !%cache;
-    return unless %cache;
+    warn "  [cache] install: no cache entries built\n" if $debug && !%cache && !%filtered_cache;
+    return unless %cache || %filtered_cache;
 
     my $seen_replay = Devel::Cover::Optimizer::DeparseCache::Seen::start_replay($Seen_ref);
     # Cache hits update these plain backing hashrefs directly. We only tie
@@ -75,6 +82,9 @@ sub _install_deparse_cache {
     my $Seen_data = $seen_replay->data;
 
     my $Structure_ref = PadWalker::closed_over(\&Devel::Cover::add_statement_cover)->{'$Structure'};
+    my $get_cover_co = PadWalker::closed_over(\&Devel::Cover::get_cover);
+    my $Sub_name_ref = $get_cover_co->{'$Sub_name'};
+    my $orig_get_cover = \&Devel::Cover::get_cover;
     my $orig_deparse_sub = \&B::Deparse::deparse_sub;
 
     my $cache_hits          = 0;
@@ -86,8 +96,29 @@ sub _install_deparse_cache {
     my $replay_calls   = 0;
     my $replay_time    = 0;
     my $uncached_time  = 0;
+    my $filtered_hits   = 0;
+    my $filtered_stale  = 0;
 
     no warnings 'redefine';
+    *Devel::Cover::get_cover = sub {
+        my $cv = $_[0];
+        if (@_ == 1 && $$Structure_ref && ref($cv) && $cv->isa("B::CV") && exists $filtered_cache{$$cv}) {
+            my $entry = $filtered_cache{$$cv};
+            my $root = $cv->ROOT;
+            if (${$cv->START} == $entry->{start} && ref($root) && $$root == $entry->{root}) {
+                # This replays the state left by stock get_cover() immediately
+                # before its observed early return from the use_file() check.
+                $$Sub_name_ref = $entry->{final_sub_name};
+                ($Devel::Cover::File, $Devel::Cover::Line) = ($entry->{final_file}, $entry->{final_line});
+                $filtered_hits++ if $debug;
+                return;
+            }
+            $filtered_stale++ if $debug;
+        }
+
+        return $orig_get_cover->(@_);
+    };
+
     *B::Deparse::deparse_sub = sub {
         my $cv = $_[1];
         my $is_cover_get_cover = 0;
@@ -172,8 +203,8 @@ sub _install_deparse_cache {
     };
 
     if ($debug) {
-        warn sprintf "  [cache] install: ready in %.3fs (build %.3fs, entries %d)\n",
-            _time() - $install_start, $build_elapsed, scalar keys %cache;
+        warn sprintf "  [cache] install: ready in %.3fs (build %.3fs, entries %d, filtered %d)\n",
+            _time() - $install_start, $build_elapsed, scalar keys %cache, scalar keys %filtered_cache;
     }
 
     if ($debug) {
@@ -181,7 +212,7 @@ sub _install_deparse_cache {
         my $log_replay_summary = sub {
             my ($report_start) = @_;
             warn sprintf(
-                "  [cache] replay: hits=%d misses=%d stale=%d seen_misses=%d (zero=%d nonzero=%d private=%d replayed=%d) calls=%d replay_time=%.3fs uncached_time=%.3fs report_time=%.3fs\n",
+                "  [cache] replay: hits=%d misses=%d stale=%d seen_misses=%d (zero=%d nonzero=%d private=%d replayed=%d) calls=%d filtered_hits=%d filtered_stale=%d replay_time=%.3fs uncached_time=%.3fs report_time=%.3fs\n",
                 $cache_hits,
                 $cache_misses,
                 $cache_stale_misses,
@@ -191,6 +222,8 @@ sub _install_deparse_cache {
                 $cache_seen_miss_reason{private} // 0,
                 $cache_seen_miss_reason{replayed} // 0,
                 $replay_calls,
+                $filtered_hits,
+                $filtered_stale,
                 $replay_time,
                 $uncached_time,
                 _time() - $report_start,
@@ -235,7 +268,7 @@ sub _install_deparse_cache {
 # immediately but only invalidated if uncached deparse reaches them before their
 # cached owner replays.
 sub _build_deparse_cache {
-    my ($cache, $Cvs_ref, $Subs_only_ref, $debug) = @_;
+    my ($cache, $filtered_cache, $Cvs_ref, $Subs_only_ref, $debug) = @_;
 
     my $build_start = $debug ? _time() : 0;
     warn "  [cache] build: locating Devel::Cover state\n" if $debug >= 2;
@@ -244,14 +277,19 @@ sub _build_deparse_cache {
     my $gc_co  = PadWalker::closed_over(\&Devel::Cover::get_cover);
     my $rpt_co = PadWalker::closed_over(\&Devel::Cover::_report);
     my $dep_co = PadWalker::closed_over(\&Devel::Cover::deparse);
+    my $uf_co  = PadWalker::closed_over(\&Devel::Cover::use_file);
 
     my $Structure_ref = $asc_co->{'$Structure'};
     my $Coverage_ref  = $rpt_co->{'$Coverage'};
     my $Run_ref       = $asc_co->{'%Run'};
+    my $Sub_name_ref  = $gc_co->{'$Sub_name'};
     my $Sub_count_ref = $gc_co->{'$Sub_count'};
     my $Seen_ref      = $dep_co->{'%Seen'};
     my $Pod_ref       = $gc_co->{'$Pod'};
     my $Pod_cache_ref = $gc_co->{'%Pod'};
+    my $Select_re_ref = $uf_co->{'@Select_re'} || [];
+    my $Ignore_re_ref = $uf_co->{'@Ignore_re'} || [];
+    my $Inc_re_ref    = $uf_co->{'@Inc_re'}    || [];
 
     # Save originals so we can restore after cache building.
     my $save_Structure = $$Structure_ref;
@@ -289,6 +327,7 @@ sub _build_deparse_cache {
         duplicates   => 0,
         empty        => 0,
         failed       => 0,
+        filtered     => 0,
         invalid_cv   => 0,
         no_location  => 0,
         main         => 0,
@@ -427,6 +466,7 @@ sub _build_deparse_cache {
             }
 
             my ($final_file, $final_line) = ($Devel::Cover::File, $Devel::Cover::Line);
+            my $final_sub_name = $$Sub_name_ref;
 
             my $seen_trace = $seen_tracker->take_trace;
             my ($seen_zero, $seen_nonzero, $seen_sets) = Devel::Cover::Optimizer::DeparseCache::Seen::record_touches(
@@ -453,7 +493,7 @@ sub _build_deparse_cache {
                 $stats{invalid_cv}++;
                 next;
             }
-            if (exists $cache->{$$cv}) {
+            if (exists $cache->{$$cv} || exists $filtered_cache->{$$cv}) {
                 $stats{duplicates}++;
                 next;
             }
@@ -469,6 +509,26 @@ sub _build_deparse_cache {
                     $seen_trace->{sets_true},
                 )
             ) {
+                if ($initial_location_set
+                    && defined $final_file
+                    && length $final_file
+                    && !Devel::Cover::use_file($final_file)
+                    && _file_matches_rejecting_filter($final_file, $Select_re_ref, $Ignore_re_ref, $Inc_re_ref))
+                {
+                    # Stock get_cover() returned from its use_file() check
+                    # before deparse_sub(). Replaying only the leaked state is
+                    # enough; no structure, counts, POD, or %Seen effects happened.
+                    $filtered_cache->{$$cv} = {
+                        start          => ${$cv->START},
+                        root           => $$root,
+                        final_sub_name => $final_sub_name,
+                        final_file     => $final_file,
+                        final_line     => $final_line,
+                    };
+                    $stats{filtered}++;
+                    next;
+                }
+
                 # No calls and no %Seen effects means replaying this CV cannot
                 # affect later coverage discovery.
                 $stats{empty}++;
@@ -546,17 +606,18 @@ sub _build_deparse_cache {
 
     if ($debug) {
         warn sprintf(
-            "  [cache] build: cached %d/%d CVs in %.3fs (%d calls, %d seen-only)\n",
+            "  [cache] build: cached %d/%d CVs in %.3fs (%d filtered, %d calls, %d seen-only)\n",
             $stats{cached},
             $stats{candidates},
             _time() - $build_start,
+            $stats{filtered},
             $stats{calls},
             $stats{seen_only},
         );
     }
     if ($debug >= 2) {
         warn sprintf(
-            "  [cache] build detail: processed=%d failed=%d main=%d duplicate=%d invalid=%d no_root=%d empty=%d no_location=%d seen_zero=%d seen_nonzero=%d seen_sets=%d private_zero=%d shared_zero=%d private_sets=%d shared_sets=%d\n",
+            "  [cache] build detail: processed=%d failed=%d main=%d duplicate=%d invalid=%d no_root=%d empty=%d filtered=%d no_location=%d seen_zero=%d seen_nonzero=%d seen_sets=%d private_zero=%d shared_zero=%d private_sets=%d shared_sets=%d\n",
             $stats{processed},
             $stats{failed},
             $stats{main},
@@ -564,6 +625,7 @@ sub _build_deparse_cache {
             $stats{invalid_cv},
             $stats{no_root},
             $stats{empty},
+            $stats{filtered},
             $stats{no_location},
             $stats{seen_zero},
             $stats{seen_nonzero},
@@ -576,6 +638,21 @@ sub _build_deparse_cache {
     }
 
     return ($Seen_ref, $private_seen_owner);
+}
+
+sub _file_matches_rejecting_filter {
+    my ($file, $Select_re_ref, $Ignore_re_ref, $Inc_re_ref) = @_;
+
+    # use_file() has fallback and special-case rejection paths with extra
+    # behavior. Only cache false returns attributable to configured rejecting
+    # filters, preserving Devel::Cover's select-before-ignore precedence.
+    # The caller already observed !use_file($file), so a selected file should
+    # not reach here, but keep the precedence check explicit for safety.
+    for my $re (@$Select_re_ref) { return 0 if $file =~ $re }
+    for my $re (@$Ignore_re_ref) { return 1 if $file =~ $re }
+    for my $re (@$Inc_re_ref)    { return 1 if $file =~ $re }
+
+    return 0;
 }
 
 # Late imports do not affect bare `time` ops compiled earlier, so debug timing

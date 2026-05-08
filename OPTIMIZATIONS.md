@@ -190,6 +190,12 @@ a CV's address matches the cache (validated by checking that `START` and
 instead of re-walking the op tree. The replayed calls read per-child
 `$Coverage` at call time, so each child gets correct counts.
 
+The same parent pass also records a cheaper cache entry for CVs where stock
+`get_cover()` established an initial location and then returned from its own
+`use_file()` check before deparse, subroutine, POD, or `%Seen` side effects. In
+children, a small `get_cover()` wrapper can replay just the leaked `$Sub_name`,
+`$File`, and `$Line` state for those observed early returns.
+
 Under forkprove, `Devel::Cover::Optimizer` should be on the forkprove
 command line (not in `PERL5OPT`) so it loads after the app preload:
 
@@ -258,7 +264,7 @@ function normally since its state has been restored.
 
 ### Replay correctness
 
-Each cache entry stores four things: the recorded `add_*_cover` call
+Each deparse cache entry stores four things: the recorded `add_*_cover` call
 sequence, `START`/`ROOT` op addresses for validation, the `%Seen`
 assumptions and mutations from that CV's deparse walk, and the final
 `$File`/`$Line` state left by `get_cover()`.
@@ -348,7 +354,31 @@ then reduced by the private/shared split.
 CVs that produce no `add_*_cover` calls but do change `%Seen` from false to true
 are still cached with an empty call list, because their duplicate-suppression
 state can affect later uncached walks. CVs with no calls and no `%Seen` effects
-are omitted.
+are omitted, unless stock `get_cover()` reached its own ignored-file early
+return.
+
+**Filtered `get_cover()` replay:** A filtered entry is recorded only after the
+parent has run stock `get_cover()` in normal report order and observed all of
+the following: the initial `get_location($start)` established location state,
+the final file is rejected by `use_file()`, no `add_*_cover` calls were made,
+no `%Seen` writes happened, and the rejection came from `use_file()`'s
+configured rejecting filters (`ignore` or `@INC`), with select precedence
+preserved, not from any fallback or special-case path. That means `get_cover()`
+returned before the subroutine, POD, and deparse work that would affect
+coverage structure.
+
+In children, `Devel::Cover::get_cover` is wrapped for one-argument CV calls. If
+the CV address has a filtered entry and `START`/`ROOT` still match, replay sets
+only `$Sub_name`, `$File`, and `$Line`, then returns. It does not write
+structure, counts, POD, or `%Seen`. It also deliberately skips the empty
+`$Run{vec}` slots that stock `get_location()` would have created before
+`use_file()` rejected the file: under static select/ignore options those entries
+are removed as ignored files at the end of `_report`, and they carry no counts
+or structure. If the CV is stale or not in the filtered cache, stock
+`get_cover()` runs. This is deliberately not a CV-list pre-filter: cache
+construction still lets stock Devel::Cover make the selection decision and
+record the state it leaked. Files rejected only by `use_file()`'s fallback path
+or other internal special cases are left uncached.
 
 In the example workload the split is heavily skewed toward private keys. A
 debug run showed about 9.5k private required-zero keys versus 6 shared
@@ -417,6 +447,13 @@ Under `prove` (no preload), this has minimal effect — children start fresh
 and the cache is empty. Under `forkprove` with preloaded modules, the
 savings are substantial: the deparse walk is the dominant remaining cost
 after optimization 1, and this eliminates it for all cached CVs.
+
+The filtered `get_cover()` replay is a smaller win on the example app. Local
+A/B runs against the previous committed cache implementation measured about
+3-5% faster in both run orders (`19.23s` -> `18.67s`, and `19.49s` -> `18.59s`
+in reverse order). A shorter post-guard sample measured `18.80s` -> `17.90s`.
+A debug run saw about 4,000 filtered early-return hits per child and no stale
+filtered hits.
 
 ### Why opt-in
 
@@ -514,6 +551,10 @@ was built (calling `get_location` for skipped CVs, falling back to
 Perls). It was correct across Perl 5.26/5.32/5.40 and DC 1.33-1.52, but
 benchmarked identically to running without it — the overhead of maintaining
 state parity cancelled out the savings from skipping `B::Deparse->new`.
+
+The implemented filtered `get_cover()` replay above is narrower: it does not
+remove CVs before stock `get_cover()` sees them during cache construction, and
+only replays observed stock early returns after `START`/`ROOT` validation.
 
 ### Per-CV file check in walksymtable
 
