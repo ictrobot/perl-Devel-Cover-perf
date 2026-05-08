@@ -47,6 +47,7 @@ default optimizer mode:
 - `no_walksymtable` — disable optimization 1 (walksymtable replacement)
 - `no_structure_cache` — disable optimization 3 (lazy structure DB handling)
 - `cache` — enable optimization 2 (deparse cache, requires PadWalker)
+- `no_filtered_get_cover` — with `cache`, disable ignored-file `get_cover()` replay
 - `debug`, `debug2`, `debug3` — log optimizer diagnostics to STDERR
 
 ## Benchmark Results (132 libs, 116 tests)
@@ -194,7 +195,8 @@ The same parent pass also records a cheaper cache entry for CVs where stock
 `get_cover()` established an initial location and then returned from its own
 `use_file()` check before deparse, subroutine, POD, or `%Seen` side effects. In
 children, a small `get_cover()` wrapper can replay just the leaked `$Sub_name`,
-`$File`, and `$Line` state for those observed early returns.
+`$File`, and `$Line` state for those observed early returns. This part can be
+disabled independently with `cache,no_filtered_get_cover`.
 
 Under forkprove, `Devel::Cover::Optimizer` should be on the forkprove
 command line (not in `PERL5OPT`) so it loads after the app preload:
@@ -378,7 +380,9 @@ or structure. If the CV is stale or not in the filtered cache, stock
 `get_cover()` runs. This is deliberately not a CV-list pre-filter: cache
 construction still lets stock Devel::Cover make the selection decision and
 record the state it leaked. Files rejected only by `use_file()`'s fallback path
-or other internal special cases are left uncached.
+or other internal special cases are left uncached. Use
+`cache,no_filtered_get_cover` to keep the main deparse cache while disabling
+this narrower replay path.
 
 In the example workload the split is heavily skewed toward private keys. A
 debug run showed about 9.5k private required-zero keys versus 6 shared

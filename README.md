@@ -68,6 +68,10 @@ PERL5OPT='-MDevel::Cover=+select,^lib,+ignore,^' \
   forkprove -lr -MMyApp::Web -MDevel::Cover::Optimizer=cache t/
 ```
 
+Useful diagnostic switches include `debug`, `debug2`, and `debug3`. Disable
+individual optimizations with `no_walksymtable`, `no_structure_cache`, or
+`cache,no_filtered_get_cover`.
+
 ## Compatibility
 
 [`ci/harness`](ci/harness) has been used to check compatibility on EL8, EL9, EL10, and

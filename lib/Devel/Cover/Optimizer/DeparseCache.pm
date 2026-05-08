@@ -15,6 +15,7 @@ use Devel::Cover::Optimizer::DeparseCache::Seen ();
 sub install {
     my (%args) = @_;
     my $debug = $args{debug} || 0;
+    my $filtered_get_cover = exists $args{filtered_get_cover} ? $args{filtered_get_cover} : 1;
 
     require B;
     require B::Deparse;
@@ -23,14 +24,15 @@ sub install {
     if (${^GLOBAL_PHASE} eq 'RUN') {
         # Loaded at runtime, for example forkprove's -M flags after INIT passed.
         # %Coverage is already expanded by CHECK, so we can build immediately.
-        _install_deparse_cache($debug);
+        _install_deparse_cache($debug, $filtered_get_cover);
     } else {
         # Loaded at compile time via PERL5OPT or use. %Coverage is still
         # (all => 1); defer to INIT, after all CHECK blocks have run.
         my $debug_literal = 0 + $debug;
+        my $filtered_literal = $filtered_get_cover ? 1 : 0;
         # String eval registers INIT only when this option is enabled, and avoids
         # compiling an INIT block after INIT has already passed.
-        my $ok = eval "INIT { Devel::Cover::Optimizer::DeparseCache::_install_deparse_cache($debug_literal) } 1";
+        my $ok = eval "INIT { Devel::Cover::Optimizer::DeparseCache::_install_deparse_cache($debug_literal, $filtered_literal) } 1";
         die $@ unless $ok;
     }
 
@@ -38,7 +40,8 @@ sub install {
 }
 
 sub _install_deparse_cache {
-    my ($debug) = @_;
+    my ($debug, $filtered_get_cover) = @_;
+    $filtered_get_cover = 1 unless defined $filtered_get_cover;
 
     my $install_start = $debug ? _time() : 0;
     warn "  [cache] install: starting in phase ${^GLOBAL_PHASE}\n" if $debug;
@@ -69,6 +72,7 @@ sub _install_deparse_cache {
         \%filtered_cache,
         $Cvs_ref,
         $Subs_only_ref,
+        $filtered_get_cover,
         $debug,
     );
     my $build_elapsed = $debug ? _time() - $build_start : 0;
@@ -100,24 +104,26 @@ sub _install_deparse_cache {
     my $filtered_stale  = 0;
 
     no warnings 'redefine';
-    *Devel::Cover::get_cover = sub {
-        my $cv = $_[0];
-        if (@_ == 1 && $$Structure_ref && ref($cv) && $cv->isa("B::CV") && exists $filtered_cache{$$cv}) {
-            my $entry = $filtered_cache{$$cv};
-            my $root = $cv->ROOT;
-            if (${$cv->START} == $entry->{start} && ref($root) && $$root == $entry->{root}) {
-                # This replays the state left by stock get_cover() immediately
-                # before its observed early return from the use_file() check.
-                $$Sub_name_ref = $entry->{final_sub_name};
-                ($Devel::Cover::File, $Devel::Cover::Line) = ($entry->{final_file}, $entry->{final_line});
-                $filtered_hits++ if $debug;
-                return;
+    if ($filtered_get_cover && %filtered_cache) {
+        *Devel::Cover::get_cover = sub {
+            my $cv = $_[0];
+            if (@_ == 1 && $$Structure_ref && ref($cv) && $cv->isa("B::CV") && exists $filtered_cache{$$cv}) {
+                my $entry = $filtered_cache{$$cv};
+                my $root = $cv->ROOT;
+                if (${$cv->START} == $entry->{start} && ref($root) && $$root == $entry->{root}) {
+                    # This replays the state left by stock get_cover() immediately
+                    # before its observed early return from the use_file() check.
+                    $$Sub_name_ref = $entry->{final_sub_name};
+                    ($Devel::Cover::File, $Devel::Cover::Line) = ($entry->{final_file}, $entry->{final_line});
+                    $filtered_hits++ if $debug;
+                    return;
+                }
+                $filtered_stale++ if $debug;
             }
-            $filtered_stale++ if $debug;
-        }
 
-        return $orig_get_cover->(@_);
-    };
+            return $orig_get_cover->(@_);
+        };
+    }
 
     *B::Deparse::deparse_sub = sub {
         my $cv = $_[1];
@@ -268,7 +274,7 @@ sub _install_deparse_cache {
 # immediately but only invalidated if uncached deparse reaches them before their
 # cached owner replays.
 sub _build_deparse_cache {
-    my ($cache, $filtered_cache, $Cvs_ref, $Subs_only_ref, $debug) = @_;
+    my ($cache, $filtered_cache, $Cvs_ref, $Subs_only_ref, $filtered_get_cover, $debug) = @_;
 
     my $build_start = $debug ? _time() : 0;
     warn "  [cache] build: locating Devel::Cover state\n" if $debug >= 2;
@@ -509,7 +515,8 @@ sub _build_deparse_cache {
                     $seen_trace->{sets_true},
                 )
             ) {
-                if ($initial_location_set
+                if ($filtered_get_cover
+                    && $initial_location_set
                     && defined $final_file
                     && length $final_file
                     && !Devel::Cover::use_file($final_file)
