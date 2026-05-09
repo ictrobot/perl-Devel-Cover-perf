@@ -52,39 +52,66 @@ default optimizer mode:
 
 ## Benchmark Results (132 libs, 116 tests)
 
-Timings below are from sequential runs in the `dco-test/alma8:dc-1.52`
-container using Devel::Cover's default report criteria for this repository:
-statement, branch, condition, and subroutine.
+Timings below are mean wall times from sequential Hyperfine 1.19.0 runs on
+Perl 5.40.1 with Devel::Cover 1.52. Coverage criteria were statement, branch,
+condition, subroutine, and time. `Pod::Coverage` was not installed, so POD
+coverage was not included. The run used 10 measured runs and 2 warmups.
+
+Coverage timings measure the full `example/run-tests` workflow, including
+`cover -delete -silent` before the test run to delete the previous coverage
+database and `cover -silent` report generation afterwards.
+The no-coverage timings do not run those commands.
 
 ### Baselines (no coverage)
 
 | Runner       | Time  |
 |--------------|-------|
-| `prove`      | 8.33s |
-| `forkprove`  | 5.57s |
+| `prove`      | 9.28s |
+| `forkprove`  | 6.45s |
 
 ### Default mode
 
 | Configuration              | `prove`    | `forkprove` |
 |----------------------------|------------|-------------|
-| stock (no Optimizer)          | 24.59s     | 33.61s      |
-| **Devel::Cover::Optimizer**   | **20.28s** | **24.75s**  |
+| stock (no Optimizer)          | 26.80s     | 37.64s      |
+| **Devel::Cover::Optimizer**   | **20.19s** | **27.80s**  |
 
-**-18%** with `prove` and **-26%** with `forkprove` vs stock.
+**-25%** with `prove` and **-26%** with `forkprove` vs stock.
 
 ### With `cache` (requires PadWalker)
 
 | Configuration              | `prove`    | `forkprove` |
 |----------------------------|------------|-------------|
-| stock (no Optimizer)          | 24.59s     | 33.61s      |
-| Optimizer (no cache)          | 20.28s     | 24.75s      |
-| Optimizer + cache             | 24.82s     | **15.83s**  |
+| stock (no Optimizer)          | 26.80s     | 37.64s      |
+| Optimizer (no cache)          | 20.19s     | 27.80s      |
+| Optimizer + cache             | 23.34s     | **16.95s**  |
 
 The cache is intended for `forkprove`. Under plain `prove`, each test process
 starts fresh and there is no preloaded parent state to reuse, so cache-building
-overhead makes the run slower. Under `forkprove` it eliminates ~9s of redundant
-`B::Deparse` work inherited from the preloaded parent — a **-53%** reduction
-vs stock and **-36%** vs Optimizer without cache.
+overhead makes the run slower. Under `forkprove` it eliminates about 11s of
+redundant `B::Deparse` work inherited from the preloaded parent, a **-55%**
+reduction vs stock and **-39%** vs Optimizer without cache.
+
+### Option impact
+
+The full benchmark set also runs escape hatches to estimate each optimization's
+individual contribution. The "enabled" column is the normal optimized mode and
+the "disabled" column turns off the named optimization while keeping the rest
+of the mode the same. "Effect" is enabled vs disabled; negative means enabling
+the optimization made that run faster.
+
+| Optimization | Runner/mode | Enabled | Disabled | Effect |
+|--------------|-------------|--------:|---------:|-------:|
+| walksymtable pruning | `prove` | 20.19s | 23.44s | -14% |
+| walksymtable pruning | `forkprove` | 27.80s | 35.75s | -22% |
+| walksymtable pruning | `prove`, `cache` | 23.34s | 28.51s | -18% |
+| walksymtable pruning | `forkprove`, `cache` | 16.95s | 25.31s | -33% |
+| structure cache | `prove` | 20.19s | 21.15s | -5% |
+| structure cache | `forkprove` | 27.80s | 28.03s | -1% |
+| structure cache | `prove`, `cache` | 23.34s | 24.40s | -4% |
+| structure cache | `forkprove`, `cache` | 16.95s | 17.92s | -5% |
+| filtered `get_cover` replay | `prove`, `cache` | 23.34s | 22.69s | +3% |
+| filtered `get_cover` replay | `forkprove`, `cache` | 16.95s | 17.32s | -2% |
 
 ## Optimization 1: Replace walksymtable with filtered version
 
@@ -452,12 +479,12 @@ and the cache is empty. Under `forkprove` with preloaded modules, the
 savings are substantial: the deparse walk is the dominant remaining cost
 after optimization 1, and this eliminates it for all cached CVs.
 
-The filtered `get_cover()` replay is a smaller win on the example app. Local
-A/B runs against the previous committed cache implementation measured about
-3-5% faster in both run orders (`19.23s` -> `18.67s`, and `19.49s` -> `18.59s`
-in reverse order). A shorter post-guard sample measured `18.80s` -> `17.90s`.
-A debug run saw about 4,000 filtered early-return hits per child and no stale
-filtered hits.
+The filtered `get_cover()` replay is a smaller win on the example app and only
+helps in the intended `forkprove` + `cache` mode. In the full benchmark set,
+disabling it with `cache,no_filtered_get_cover` changed `forkprove` + `cache`
+from `16.95s` to `17.32s`, a roughly 2% slowdown. Under plain `prove` +
+`cache`, disabling it was slightly faster (`23.34s` to `22.69s`) because there
+is no preloaded parent state to reuse.
 
 ### Why opt-in
 
@@ -525,13 +552,18 @@ paths. Generated `get_*` methods are patched too, so lazy `read_all()` also
 works for report-time structure lookup by digest if the optimizer is loaded
 there.
 
-Focused local A/B benchmarks against the committed `no_structure_cache` escape
-hatch showed plain `prove` improving by about 7%, forkprove without the deparse
-cache staying effectively neutral, and the intended forkprove + deparse-cache
-path improving by about 7%. In that last case, system time dropped from
-`4.427s` to `3.521s` in this example.
+Full benchmark runs against the `no_structure_cache` escape hatch show a modest
+but consistent contribution. With the default optimizer, structure caching
+improved `prove` from `21.15s` to `20.19s`; `forkprove` without the deparse
+cache was effectively neutral (`28.03s` to `27.80s`). In the intended
+`forkprove` + `cache` path, it improved wall time from `17.92s` to `16.95s`;
+system time dropped from `4.35s` to `3.61s` in this example.
 
 ## Discarded approaches
+
+Timings in this section are historical local prototype measurements. They are
+not part of the current `ci/bench` matrix above, but they record why those
+approaches were dropped.
 
 ### Pre-filter CV lists in `get_cover_progress`
 

@@ -11,12 +11,19 @@ savings.
 
 ## Observed Performance (model codebase: 132 libs, 116 tests)
 
+Measured with Hyperfine 1.19.0 on Perl 5.40.1 with Devel::Cover 1.52.
+`Pod::Coverage` was not installed, so POD coverage was not included.
+
 | Mode                | Time   | Notes                           |
 |---------------------|--------|---------------------------------|
-| `prove`             | 8.33s  | baseline                        |
-| `forkprove`         | 5.57s  | 1.5x faster (preload saves ~3s) |
-| `prove + cover`     | 24.59s |                                 |
-| `forkprove + cover` | 33.61s | **slower** than prove + cover   |
+| `prove`             | 9.28s  | baseline                        |
+| `forkprove`         | 6.45s  | 1.4x faster (preload saves ~3s) |
+| `prove + cover`     | 26.80s |                                 |
+| `forkprove + cover` | 37.64s | **slower** than prove + cover   |
+
+Coverage timings measure the full `example/run-tests` workflow, including
+`cover -delete -silent` before the test run and `cover -silent` report
+generation afterwards.
 
 ## Note on forkprove Coverage Counts
 
@@ -160,20 +167,24 @@ At 116 tests: **29.0s** in `_report` alone.
 ## Why forkprove + cover is Slower: The Math
 
 ```
-prove + cover:
-  Per-test _report:          ~0.05s × 116 = 5.8s
-  Per-test module compile:   ~0.18s × 69 heavy tests = 12.4s
-  Actual test execution + other overhead: ~6.4s
-  Total: ~24.6s ✓
+No coverage:
+  prove:                     9.28s
+  forkprove:                 6.45s
+  preload saving:            2.83s
 
-forkprove + cover:
-  Per-test _report:          ~0.25s × 116 = 29.0s  (preload bloats this)
-  Per-test module compile:   0s (preloaded)
-  Actual test execution + other overhead: ~4.6s
-  Total: ~33.6s ✓
+Coverage:
+  prove + cover:             26.80s
+  forkprove + cover:         37.64s
+  forkprove penalty:         10.84s
 
-Delta: forkprove loses ~23s in _report, saves 12.4s from no recompile = ~11s slower
-Actual: ~9s slower ✓
+Coverage overhead:
+  prove:                     26.80s - 9.28s = 17.52s
+  forkprove:                 37.64s - 6.45s = 31.19s
+  extra forkprove overhead:  13.67s
+
+Net:
+  forkprove saves ~2.8s without coverage, then loses ~13.7s of extra
+  coverage overhead, so the coverage run is ~10.8s slower overall.
 ```
 
 ## Potential Optimizations

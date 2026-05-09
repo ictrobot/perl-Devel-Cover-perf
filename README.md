@@ -34,20 +34,24 @@ this approach in a real coverage workflow.
 
 ## Current results
 
-Representative sequential timings from the `dco-test/alma8:dc-1.52` container,
-using 132 example modules, 116 tests, and coverage for statement, branch,
-condition, and subroutine:
+Representative sequential Hyperfine 1.19.0 timings from Perl 5.40.1 with
+Devel::Cover 1.52, using 132 example modules, 116 tests, and coverage for
+statement, branch, condition, subroutine, and time.
+
+Coverage timings measure the full `example/run-tests` workflow, including
+`cover -delete -silent` before the test run to remove the previous coverage
+database and `cover -silent` report generation afterwards.
 
 | Configuration | `prove` | `forkprove` |
 | --- | ---: | ---: |
-| no coverage | 8.33s | 5.57s |
-| stock `Devel::Cover` | 24.59s | 33.61s |
-| `Devel::Cover::Optimizer` | 20.28s | 24.75s |
-| `Devel::Cover::Optimizer=cache` | 24.82s | 15.83s |
+| no coverage | 9.28s | 6.45s |
+| stock `Devel::Cover` | 26.80s | 37.64s |
+| `Devel::Cover::Optimizer` | 20.19s | 27.80s |
+| `Devel::Cover::Optimizer=cache` | 23.34s | 16.95s |
 
-The default optimizer is about 18% faster with `prove` and 26% faster with
+The default optimizer is about 25% faster with `prove` and 26% faster with
 `forkprove` in this benchmark. The `cache` option is intended for `forkprove`
-with a preload; there it is about 53% faster than stock `Devel::Cover` and 36%
+with a preload; there it is about 55% faster than stock `Devel::Cover` and 39%
 faster than the optimizer without cache. Under plain `prove`, `cache` is slower
 because there is no preloaded parent process to reuse.
 

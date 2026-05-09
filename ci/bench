@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+usage() {
+    cat <<'EOF'
+Usage: ./ci/bench [OPTIONS]
+
+Runs the example Hyperfine benchmark set and writes results under ci/output/.
+Hyperfine remains attached to the terminal, so progress is shown normally.
+
+Options:
+  --set SET       Benchmark set: full or core (default: full)
+  --runs N        Exact Hyperfine run count (default: 10)
+  --warmup N      Hyperfine warmup count (default: 1)
+  --output DIR    Output directory (default: ci/output/bench-YYYYMMDD-HHMMSS)
+  -h, --help      Show this help
+
+Environment overrides:
+  BENCH_SET       Same as --set
+  RUNS            Same as --runs
+  WARMUP          Same as --warmup
+  HYPERFINE       Hyperfine executable (default: hyperfine)
+
+The core set is the headline README/OPTIMIZATIONS table:
+  prove/forkprove, no coverage, stock cover, Optimizer, Optimizer=cache.
+
+The full set also benchmarks the main optimizer escape hatches:
+  no_walksymtable, cache,no_walksymtable, no_structure_cache,
+  cache,no_structure_cache, cache,no_filtered_get_cover.
+EOF
+}
+
+bench_set="${BENCH_SET:-full}"
+runs="${RUNS:-10}"
+# One warmup gives each coverage command an existing cover_db to delete before
+# measured runs, matching the steady-state cleanup cost of later iterations.
+warmup="${WARMUP:-1}"
+hyperfine_bin="${HYPERFINE:-hyperfine}"
+timestamp="$(date +%Y%m%d-%H%M%S)"
+output_dir=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --set)
+            bench_set="$2"
+            shift 2
+            ;;
+        --set=*)
+            bench_set="${1#--set=}"
+            shift
+            ;;
+        --runs)
+            runs="$2"
+            shift 2
+            ;;
+        --runs=*)
+            runs="${1#--runs=}"
+            shift
+            ;;
+        --warmup)
+            warmup="$2"
+            shift 2
+            ;;
+        --warmup=*)
+            warmup="${1#--warmup=}"
+            shift
+            ;;
+        --output)
+            output_dir="$2"
+            shift 2
+            ;;
+        --output=*)
+            output_dir="${1#--output=}"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+case "$bench_set" in
+    core|full) ;;
+    *)
+        echo "Unknown benchmark set: $bench_set" >&2
+        echo "Expected: core or full" >&2
+        exit 2
+        ;;
+esac
+
+if ! command -v "$hyperfine_bin" >/dev/null 2>&1; then
+    echo "Cannot find Hyperfine executable: $hyperfine_bin" >&2
+    exit 1
+fi
+
+output_dir="${output_dir:-ci/output/bench-$timestamp}"
+mkdir -p "$output_dir"
+
+names=(
+    "prove"
+    "forkprove"
+    "prove + cover"
+    "forkprove + cover"
+    "prove + cover + optimizer"
+    "forkprove + cover + optimizer"
+    "prove + cover + optimizer=cache"
+    "forkprove + cover + optimizer=cache"
+)
+
+commands=(
+    "./example/run-tests"
+    "./example/run-tests -f"
+    "./example/run-tests -c"
+    "./example/run-tests -fc"
+    "./example/run-tests -co"
+    "./example/run-tests -fco"
+    "./example/run-tests -c -o cache"
+    "./example/run-tests -fc -o cache"
+)
+
+if [[ "$bench_set" == "full" ]]; then
+    names+=(
+        "prove + cover + optimizer=no_walksymtable"
+        "forkprove + cover + optimizer=no_walksymtable"
+        "prove + cover + optimizer=cache,no_walksymtable"
+        "forkprove + cover + optimizer=cache,no_walksymtable"
+        "prove + cover + optimizer=no_structure_cache"
+        "forkprove + cover + optimizer=no_structure_cache"
+        "prove + cover + optimizer=cache,no_structure_cache"
+        "forkprove + cover + optimizer=cache,no_structure_cache"
+        "prove + cover + optimizer=cache,no_filtered_get_cover"
+        "forkprove + cover + optimizer=cache,no_filtered_get_cover"
+    )
+
+    commands+=(
+        "./example/run-tests -c -o no_walksymtable"
+        "./example/run-tests -fc -o no_walksymtable"
+        "./example/run-tests -c -o cache,no_walksymtable"
+        "./example/run-tests -fc -o cache,no_walksymtable"
+        "./example/run-tests -c -o no_structure_cache"
+        "./example/run-tests -fc -o no_structure_cache"
+        "./example/run-tests -c -o cache,no_structure_cache"
+        "./example/run-tests -fc -o cache,no_structure_cache"
+        "./example/run-tests -c -o cache,no_filtered_get_cover"
+        "./example/run-tests -fc -o cache,no_filtered_get_cover"
+    )
+fi
+
+metadata="$output_dir/metadata.txt"
+table="$output_dir/hyperfine.md"
+json="$output_dir/hyperfine.json"
+csv="$output_dir/hyperfine.csv"
+summary="$output_dir/results.md"
+
+{
+    echo "timestamp=$timestamp"
+    echo "set=$bench_set"
+    echo "runs=$runs"
+    echo "warmup=$warmup"
+    echo "hyperfine=$("$hyperfine_bin" --version 2>/dev/null || true)"
+    echo "perl=$(perl -e 'print $^V')"
+    echo "devel_cover=$(perl -MDevel::Cover::DB -e 'print $Devel::Cover::DB::VERSION' 2>/dev/null || true)"
+    echo "pod_coverage=$(perl -MPod::Coverage -e 'print $Pod::Coverage::VERSION' 2>/dev/null || echo unavailable)"
+    echo "pod_coverage_countparents=$(perl -MPod::Coverage::CountParents -e 'print $Pod::Coverage::CountParents::VERSION' 2>/dev/null || echo unavailable)"
+    echo "git_commit=$(git rev-parse --verify HEAD 2>/dev/null || true)"
+    echo "git_status="
+    git status --short
+    echo
+    echo "commands="
+    for i in "${!commands[@]}"; do
+        printf "  [%02d] %s :: %s\n" "$((i + 1))" "${names[$i]}" "${commands[$i]}"
+    done
+} > "$metadata"
+
+hyperfine_args=(
+    --runs "$runs"
+    --warmup "$warmup"
+    --sort command
+    --time-unit second
+    --export-markdown "$table"
+    --export-json "$json"
+    --export-csv "$csv"
+)
+
+for i in "${!commands[@]}"; do
+    hyperfine_args+=(--command-name "${names[$i]}" "${commands[$i]}")
+done
+
+echo "Output directory: $output_dir"
+echo "Benchmark set: $bench_set"
+echo "Runs: $runs"
+echo "Warmups: $warmup"
+echo "Commands: ${#commands[@]}"
+echo
+"$hyperfine_bin" "${hyperfine_args[@]}"
+
+{
+    echo "# Benchmark Results"
+    echo
+    echo "- Timestamp: \`$timestamp\`"
+    echo "- Set: \`$bench_set\`"
+    echo "- Runs: \`$runs\`"
+    echo "- Warmups: \`$warmup\`"
+    echo "- Git commit: \`$(git rev-parse --short HEAD 2>/dev/null || true)\`"
+    echo
+    echo "## Commands"
+    echo
+    for i in "${!commands[@]}"; do
+        printf "%d. \`%s\`: \`%s\`\n" "$((i + 1))" "${names[$i]}" "${commands[$i]}"
+    done
+    echo
+    echo "## Hyperfine"
+    echo
+    cat "$table"
+} > "$summary"
+
+echo
+echo "Wrote:"
+echo "  $summary"
+echo "  $json"
+echo "  $csv"
+echo "  $metadata"
